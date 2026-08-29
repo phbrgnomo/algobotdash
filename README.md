@@ -41,8 +41,8 @@ Enquanto o dashboard está sendo implementado, o relatório existente pode ser g
 O primeiro slice da Issue #2 reconstrói uma projeção SQLite a partir da seção `Posições` do relatório. Copie `config.example.yaml` para `config.yaml`, ajuste o caminho da fonte e execute:
 
 ```bash
-python -m pip install -r requirements.txt
-python -m algobotdash --config config.yaml --database data/algobotdash.sqlite
+poetry install
+poetry run python -m algobotdash --config config.yaml --database data/algobotdash.sqlite
 ```
 
 A atualização escreve uma base temporária e só a publica ao concluir. A projeção contém `imports`, `cycles`, `orders` e `rejected_rows`; comentários sem grupo ficam preservados com `strategy` nula. Uma ambiguidade de agrupamento interrompe a atualização e mantém a última projeção válida.
@@ -50,16 +50,17 @@ A atualização escreve uma base temporária e só a publica ao concluir. A proj
 ### Pré-requisitos
 
 - Python 3.10 ou superior;
-- `openpyxl`.
+- Poetry 1.8 ou superior.
 
 ### Execução
 
 Coloque o arquivo `ReportHistory-2002705608.xlsx` na raiz do projeto e execute:
 
 ```bash
-python -m pip install openpyxl
-python generate_trade_report.py
+poetry run python generate_trade_report.py
 ```
+
+Os comandos Python do projeto devem ser executados com `poetry run`; o ambiente virtual local fica em `.venv/` e as versões resolvidas são registradas em `poetry.lock`.
 
 Os artefatos são gravados em `reports/`. Essa pasta é ignorada pelo Git e não deve ser publicada quando contiver dados reais.
 
