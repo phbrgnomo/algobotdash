@@ -1,6 +1,6 @@
 # algobotdash
 
-Dashboard local para transformar históricos de trades automatizados em análises reproduzíveis por estratégia, símbolo e ciclo operacional.
+Dashboard local para processar o relatório padrão de histórico de trades do MetaTrader 5 e transformar operações automatizadas em análises reproduzíveis por estratégia, símbolo e ciclo operacional.
 
 > [!WARNING]
 > Este repositório é público. Os arquivos reais de trades, planilhas, CSVs e relatórios gerados ficam fora do Git por design. Não publique dados de corretora neste repositório.
@@ -11,9 +11,9 @@ O projeto está na fase de fundação e especificação. O parser legado já ger
 
 ## Objetivo
 
-O `algobotdash` será uma aplicação local que:
+O `algobotdash` será uma aplicação local que recebe o relatório padrão de trades exportado pelo MetaTrader 5 e:
 
-- lê um relatório Excel como fonte canônica;
+- lê o relatório Excel padrão do MetaTrader 5 como fonte canônica;
 - normaliza contratos futuros em famílias como `WIN`, `WDO` e `BIT`;
 - agrupa comentários de estratégia, incluindo piramidações, em ciclos completos;
 - reconstrói uma projeção SQLite de forma idempotente;
