@@ -10,9 +10,9 @@ symbols:
 strategies:
   groups:
     - name: Turtle
-      patterns: ["turtle", "turtlepyr"]
+      patterns: ["TurtleS2", "TurtlePyr_1", "TurtlePyr_2"]
     - name: FVG
-      patterns: ["fvg"]
+      patterns: ["FVGscalp"]
     - name: RadarWIN
       patterns: ["radarwin"]
     - name: RadarWDO
@@ -20,4 +20,4 @@ strategies:
     - name: Soberano
       patterns: ["soberano"]
     - name: EngulfPattern
-      patterns: ["engulf"]
+      patterns: ["engulfpattern"]
