@@ -1,0 +1,30 @@
+# Trade data and source workbooks
+*.xlsx
+*.xls
+*.csv
+*.parquet
+*.feather
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Generated temporary files
+*.tmp
+*.log
+
+# Generated reports
+reports/
