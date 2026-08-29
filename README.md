@@ -36,6 +36,17 @@ Consulte o [glossário do projeto](CONTEXT.md) para a terminologia completa.
 
 Enquanto o dashboard está sendo implementado, o relatório existente pode ser gerado diretamente a partir do workbook local.
 
+### Importação para SQLite
+
+O primeiro slice da Issue #2 reconstrói uma projeção SQLite a partir da seção `Posições` do relatório. Copie `config.example.yaml` para `config.yaml`, ajuste o caminho da fonte e execute:
+
+```bash
+python -m pip install -r requirements.txt
+python -m algobotdash --config config.yaml --database data/algobotdash.sqlite
+```
+
+A atualização escreve uma base temporária e só a publica ao concluir. A projeção contém `imports`, `cycles`, `orders` e `rejected_rows`; comentários sem grupo ficam preservados com `strategy` nula. Uma ambiguidade de agrupamento interrompe a atualização e mantém a última projeção válida.
+
 ### Pré-requisitos
 
 - Python 3.10 ou superior;
