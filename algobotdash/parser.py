@@ -124,7 +124,10 @@ def _last_section_rows(rows: list[tuple[Any, ...]], section: str, end_marker: st
 
 def read_report(source: str | Path, config: ImportConfig) -> tuple[list[PositionRecord], list[OrderRecord], list[TransactionRecord], list[RejectedRecord], int]:
     workbook = load_workbook(source, read_only=True, data_only=True)
-    rows = list(workbook.active.iter_rows(values_only=True))
+    sheet = workbook.active
+    if sheet is None:
+        raise ValueError(f"o workbook não possui planilha ativa: {source}")
+    rows: list[tuple[Any, ...]] = [tuple(row) for row in sheet.iter_rows(values_only=True)]
     try:
         order_rows = list(_section_rows(rows, "Ordens", "Transações"))
         comments = {str(row[1]): str(row[11] or "").strip() for _, row in order_rows if len(row) > 11 and row[1]}
