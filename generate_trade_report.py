@@ -1,8 +1,13 @@
-from openpyxl import load_workbook
-from pathlib import Path
-from datetime import datetime, timedelta
+import html
+import json
+import math
+import random
+import re
 from collections import defaultdict
-import math, random, html, json, re
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from openpyxl import load_workbook
 
 SRC=Path('ReportHistory-2002705608.xlsx'); OUT=Path('reports'); OUT.mkdir(exist_ok=True)
 START=datetime(2026,4,1); SEED=20260829
