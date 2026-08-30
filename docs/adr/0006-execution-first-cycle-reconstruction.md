@@ -22,7 +22,7 @@ O desenho futuro poderá agrupar posições de uma entrada-base e suas piramida�
 
 A configuração de estratégia continuará declarando padrões de comentários, mas não será usada para afirmar uma linhagem de ciclo no MVP.
 
-No MVP, posições sem comentário ou com símbolo não normalizado continuarão preservadas, mas ficarão fora das agregações normalizadas. O P&L por estratégia será obtido do resumo de posições; a soma das transações será usada para reconciliação global, não para atribuir saídas a estratégias.
+No MVP, posições sem um vínculo explícito com uma ordem, ou com símbolo não normalizado, continuarão preservadas, mas ficarão fora das agregações normalizadas. O P&L por posição será obtido do resumo de posições; comentários e estratégias serão atribuídos às ordens e às transações que referenciam explicitamente essas ordens, sem projetar esse vínculo para posições.
 
 ## Consequences
 

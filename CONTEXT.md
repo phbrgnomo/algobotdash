@@ -59,7 +59,7 @@ Conferência entre o P&L consolidado das posições e a soma das transações do
 _Avoid_: atribuição de saída por igualdade de P&L
 
 **Posição analítica**:
-Unidade de análise do MVP, identificada pelo registro de posição e classificada pela ordem de entrada correspondente; ciclos de piramidação não são inferidos nesta versão.
+Unidade de análise do MVP, identificada pelo registro de posição; sem um campo explícito de vínculo, não é classificada pela ordem correspondente e ciclos de piramidação não são inferidos nesta versão.
 _Avoid_: ciclo implícito, agrupamento por proximidade
 
 **Ordem**:

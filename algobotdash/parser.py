@@ -137,19 +137,30 @@ def _read_rows(source: str | Path) -> list[tuple[Any, ...]]:
     return [tuple(row) for row in sheet.iter_rows(values_only=True)]
 
 
+def _require_header(rows: list[tuple[Any, ...]], section: str, expected: tuple[tuple[int, Any], ...]) -> None:
+    section_index = next((index for index, row in enumerate(rows) if _cell(row, 0) == section), None)
+    if section_index is None or section_index + 1 >= len(rows):
+        raise ValueError(f"a seção {section} não possui cabeçalho")
+    header = rows[section_index + 1]
+    if any(_cell(header, index) != value for index, value in expected):
+        raise ValueError(f"cabeçalho inválido na seção {section}")
+
+
 def _report_sections(rows: list[tuple[Any, ...]]) -> tuple[list[tuple[int, tuple[Any, ...]]], list[tuple[int, tuple[Any, ...]]], list[tuple[int, tuple[Any, ...]]]]:
     try:
+        _require_header(rows, "Posições", ((0, "Horário"), (1, "Position"), (2, "Ativo"), (3, "Tipo"), (4, "Volume"), (5, "Preço"), (12, "Lucro")))
+        _require_header(rows, "Ordens", ((0, "Horário da Abertura"), (1, "Ordem"), (2, "Ativo"), (3, "Tipo"), (4, "Volume"), (5, "Preço"), (8, "Horário"), (9, "Estado"), (11, "Comentário")))
+        _require_header(rows, "Transações", ((0, "Horário"), (1, "Oferta"), (2, "Ativo"), (3, "Tipo"), (4, "Direção"), (5, "Volume"), (6, "Preço"), (7, "Ordem"), (11, "Lucro"), (12, "Saldo"), (13, "Comentário")))
         order_rows = list(_section_rows(rows, "Ordens", "Transações"))
         position_rows = list(_section_rows(rows, "Posições", "Ordens"))
         transaction_rows = list(_last_section_rows(rows, "Transações", "Posições Abertas"))
     except StopIteration as exc:
-        raise ValueError("o workbook precisa conter as seções Posições e Ordens") from exc
+        raise ValueError("o workbook precisa conter as seções Posições, Ordens e Transações") from exc
     return position_rows, order_rows, transaction_rows
 
 
-def _parse_positions(rows: Iterable[tuple[int, tuple[Any, ...]]], config: ImportConfig, comments: dict[str, str]) -> tuple[list[PositionRecord], set[str], list[RejectedRecord]]:
+def _parse_positions(rows: Iterable[tuple[int, tuple[Any, ...]]], config: ImportConfig) -> tuple[list[PositionRecord], list[RejectedRecord]]:
     records: list[PositionRecord] = []
-    position_ids: set[str] = set()
     rejected: list[RejectedRecord] = []
     for row_number, row in rows:
         position_id = str(_cell(row, 1) or "").strip()
@@ -161,17 +172,17 @@ def _parse_positions(rows: Iterable[tuple[int, tuple[Any, ...]]], config: Import
         if not position_id or not entry_at or not symbol or pnl is None:
             rejected.append(RejectedRecord(row_number, "campos obrigatórios inválidos", position_id))
             continue
-        comment = comments.get(position_id, "")
-        strategy = config.classify_strategy(comment)
+        comment = ""
+        strategy = None
         volume_requested, volume_executed = _volume_pair(_cell(row, 4))
         exit_at = _datetime(_cell(row, 8))
         records.append(PositionRecord(position_id, entry_at, exit_at, symbol, config.normalize_symbol(symbol), str(_cell(row, 3) or "").strip().lower(), volume_requested, volume_executed, _number(_cell(row, 5)), _number(_cell(row, 9)), _number(_cell(row, 10)) or 0.0, _number(_cell(row, 11)) or 0.0, pnl, comment, strategy, "closed" if exit_at else "open"))
-        position_ids.add(position_id)
-    return records, position_ids, rejected
+    return records, rejected
 
 
-def _parse_orders(rows: Iterable[tuple[int, tuple[Any, ...]]], config: ImportConfig, position_ids: set[str]) -> tuple[list[OrderRecord], list[RejectedRecord]]:
+def _parse_orders(rows: Iterable[tuple[int, tuple[Any, ...]]], config: ImportConfig) -> tuple[list[OrderRecord], dict[str, str | None], list[RejectedRecord]]:
     orders: list[OrderRecord] = []
+    strategies: dict[str, str | None] = {}
     rejected: list[RejectedRecord] = []
     for row_number, row in rows:
         order_id = str(_cell(row, 1) or "").strip()
@@ -183,11 +194,13 @@ def _parse_orders(rows: Iterable[tuple[int, tuple[Any, ...]]], config: ImportCon
             continue
         requested, executed = _volume_pair(_cell(row, 4))
         comment = str(_cell(row, 11) or "").strip()
-        orders.append(OrderRecord(order_id, opened_at, symbol, str(_cell(row, 3) or "").strip().lower(), requested, executed, _number(_cell(row, 5)), _number(_cell(row, 6)), _number(_cell(row, 7)), _datetime(_cell(row, 8)), str(_cell(row, 9) or "").strip().lower(), comment, order_id if order_id in position_ids else None, config.classify_strategy(comment)))
-    return orders, rejected
+        strategy = config.classify_strategy(comment)
+        orders.append(OrderRecord(order_id, opened_at, symbol, str(_cell(row, 3) or "").strip().lower(), requested, executed, _number(_cell(row, 5)), _number(_cell(row, 6)), _number(_cell(row, 7)), _datetime(_cell(row, 8)), str(_cell(row, 9) or "").strip().lower(), comment, None, strategy))
+        strategies[order_id] = strategy
+    return orders, strategies, rejected
 
 
-def _parse_transactions(rows: Iterable[tuple[int, tuple[Any, ...]]], config: ImportConfig, comments: dict[str, str], position_ids: set[str]) -> tuple[list[TransactionRecord], list[RejectedRecord]]:
+def _parse_transactions(rows: Iterable[tuple[int, tuple[Any, ...]]], order_strategies: dict[str, str | None]) -> tuple[list[TransactionRecord], list[RejectedRecord]]:
     transactions: list[TransactionRecord] = []
     rejected: list[RejectedRecord] = []
     for row_number, row in rows:
@@ -200,19 +213,17 @@ def _parse_transactions(rows: Iterable[tuple[int, tuple[Any, ...]]], config: Imp
             if any(value not in (None, "") for value in row):
                 rejected.append(RejectedRecord(row_number, "campos obrigatórios inválidos em transação", transaction_id))
             continue
-        position_id = order_id if order_id in position_ids else None
-        strategy = config.classify_strategy(comments.get(order_id, "")) if position_id else None
-        transactions.append(TransactionRecord(transaction_id, at, str(_cell(row, 2) or "").strip(), str(_cell(row, 4) or _cell(row, 3) or "").strip().lower(), _number(_cell(row, 5)), _number(_cell(row, 6)), order_id or None, _number(_cell(row, 8)) or 0.0, _number(_cell(row, 9)) or 0.0, _number(_cell(row, 10)) or 0.0, _number(_cell(row, 11)) or 0.0, _number(_cell(row, 12)), str(_cell(row, 13) or "").strip(), position_id, strategy))
+        strategy = order_strategies.get(order_id)
+        transactions.append(TransactionRecord(transaction_id, at, str(_cell(row, 2) or "").strip(), str(_cell(row, 4) or _cell(row, 3) or "").strip().lower(), _number(_cell(row, 5)), _number(_cell(row, 6)), order_id or None, _number(_cell(row, 8)) or 0.0, _number(_cell(row, 9)) or 0.0, _number(_cell(row, 10)) or 0.0, _number(_cell(row, 11)) or 0.0, _number(_cell(row, 12)), str(_cell(row, 13) or "").strip(), None, strategy))
     return transactions, rejected
 
 
 def read_report(source: str | Path, config: ImportConfig) -> tuple[list[PositionRecord], list[OrderRecord], list[TransactionRecord], list[RejectedRecord], int]:
     rows = _read_rows(source)
     position_rows, order_rows, transaction_rows = _report_sections(rows)
-    comments = {str(_cell(row, 1)): str(_cell(row, 11) or "").strip() for _, row in order_rows if _cell(row, 1) not in (None, "")}
-    positions, position_ids, rejected_positions = _parse_positions(position_rows, config, comments)
-    orders, rejected_orders = _parse_orders(order_rows, config, position_ids)
-    transactions, rejected_transactions = _parse_transactions(transaction_rows, config, comments, position_ids)
+    positions, rejected_positions = _parse_positions(position_rows, config)
+    orders, order_strategies, rejected_orders = _parse_orders(order_rows, config)
+    transactions, rejected_transactions = _parse_transactions(transaction_rows, order_strategies)
     rejected = rejected_positions + rejected_orders + rejected_transactions
     return positions, orders, transactions, rejected, len(position_rows) + len(order_rows) + len(transaction_rows)
 

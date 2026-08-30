@@ -36,14 +36,40 @@ def workbook(path: Path, *, ambiguous: bool = False) -> None:
     sheet.append(("Ordens",))
     sheet.append(("Horário da Abertura", "Ordem", "Ativo", "Tipo", "Volume", "Preço", "S / L", "T / P", "Horário", "Estado", None, "Comentário"))
     comment = "turtle fvg" if ambiguous else "TurtleS2"
-    sheet.append(("2026.08.01 09:59:00", 1, "WINQ26", "buy limit", "2 / 2", 130000, None, None, "2026.08.01 10:00:00", "filled", None, comment))
-    sheet.append(("2026.08.01 11:59:00", 2, "WDOU26", "sell limit", "1 / 1", 5400, None, None, "2026.08.01 12:00:00", "filled", None, None))
+    sheet.append(("2026.08.01 09:59:00", 1001, "WINQ26", "buy limit", "2 / 2", 130000, None, None, "2026.08.01 10:00:00", "filled", None, comment))
+    sheet.append(("2026.08.01 11:59:00", 1002, "WDOU26", "sell limit", "1 / 1", 5400, None, None, "2026.08.01 12:00:00", "filled", None, None))
     sheet.append(("Transações",))
     sheet.append(("Horário", "Oferta", "Ativo", "Tipo", "Direção", "Volume", "Preço", "Ordem", "Comissão", "Taxa", "Swap", "Lucro", "Saldo", "Comentário"))
-    sheet.append(("2026.08.01 10:00:00", 101, "WINQ26", "buy", "in", 2, 130000, 1, -2, 0, 0, 0, 10000, "TurtleS2"))
-    sheet.append(("2026.08.01 11:00:00", 102, "WINQ26", "sell", "out", 2, 130100, 99, -2, 0, 0, 100, 10100, None))
+    sheet.append(("2026.08.01 10:00:00", 101, "WINQ26", "buy", "in", 2, 130000, 1001, -2, 0, 0, 0, 10000, "TurtleS2"))
+    sheet.append(("2026.08.01 11:00:00", 102, "WINQ26", "sell", "out", 2, 130100, 9999, -2, 0, 0, 100, 10100, None))
     sheet.append(("2026.08.01 12:00:00", 103, None, "balance", None, None, None, None, 0, 0, 0, 5, 10105, "Ajuste de Saldo"))
     book.save(path)
+
+
+def remove_section_label(path: Path, section: str) -> None:
+    book = load_workbook(path)
+    sheet = book.active
+    if sheet is None:
+        raise RuntimeError("workbook fixture has no active worksheet")
+    for row in range(1, sheet.max_row + 1):
+        if sheet.cell(row, 1).value == section:
+            sheet.cell(row, 1).value = None
+            book.save(path)
+            return
+    raise AssertionError(f"section not found: {section}")
+
+
+def truncate_positions_header(path: Path) -> None:
+    book = load_workbook(path)
+    sheet = book.active
+    if sheet is None:
+        raise RuntimeError("workbook fixture has no active worksheet")
+    for row in range(1, sheet.max_row + 1):
+        if sheet.cell(row, 1).value == "Posições":
+            sheet.cell(row + 1, 13).value = None
+            book.save(path)
+            return
+    raise AssertionError("section not found: Posições")
 
 
 class ImportPipelineTests(unittest.TestCase):
@@ -60,7 +86,7 @@ class ImportPipelineTests(unittest.TestCase):
     result = ImportService(config(source)).refresh(database)
 
     self.assertEqual(result.positions_created, 2)
-    self.assertEqual(result.no_comment_count, 1)
+    self.assertEqual(result.no_comment_count, 2)
     self.assertEqual(result.rejected_count, 0)
     connection = sqlite3.connect(database)
     self.assertEqual(connection.execute("select count(*) from positions").fetchone()[0], 2)
@@ -68,11 +94,15 @@ class ImportPipelineTests(unittest.TestCase):
     self.assertEqual(connection.execute("select count(*) from transactions").fetchone()[0], 3)
     self.assertEqual(connection.execute("select count(*) from transactions where direction = 'balance'").fetchone()[0], 1)
     self.assertEqual(connection.execute("select volume_requested, volume_executed from positions where position_id = '1'").fetchone(), (2.0, 3.0))
-    self.assertEqual(connection.execute("select volume_requested, volume_executed from orders where order_id = '1'").fetchone(), (2.0, 2.0))
-    self.assertEqual(connection.execute("select strategy from positions where position_id = '1'").fetchone()[0], "Turtle")
+    self.assertEqual(connection.execute("select volume_requested, volume_executed from orders where order_id = '1001'").fetchone(), (2.0, 2.0))
+    self.assertIsNone(connection.execute("select strategy from positions where position_id = '1'").fetchone()[0])
+    self.assertIsNone(connection.execute("select position_id from orders where order_id = '1001'").fetchone()[0])
+    self.assertEqual(connection.execute("select strategy from orders where order_id = '1001'").fetchone()[0], "Turtle")
+    self.assertEqual(connection.execute("select strategy from transactions where transaction_id = '101'").fetchone()[0], "Turtle")
+    self.assertIsNone(connection.execute("select position_id from transactions where transaction_id = '101'").fetchone()[0])
     self.assertEqual(connection.execute("select symbol_family from positions where position_id = '1'").fetchone()[0], "WIN")
     self.assertEqual(connection.execute("select status from positions where position_id = '2'").fetchone()[0], "open")
-    self.assertEqual(connection.execute("select no_comment_count, rejected_count from imports").fetchone(), (1, 0))
+    self.assertEqual(connection.execute("select no_comment_count, rejected_count from imports").fetchone(), (2, 0))
     connection.close()
 
 
@@ -96,6 +126,10 @@ class ImportPipelineTests(unittest.TestCase):
     connection = sqlite3.connect(database)
     self.assertEqual(connection.execute("select count(*) from imports").fetchone()[0], 2)
     self.assertEqual(connection.execute("select count(*) from positions").fetchone()[0], 2)
+    self.assertEqual(connection.execute("select count(*) from orders").fetchone()[0], 2)
+    self.assertEqual(connection.execute("select count(*) from transactions").fetchone()[0], 3)
+    self.assertEqual(connection.execute("select count(*) from rejected_rows").fetchone()[0], 0)
+    self.assertEqual(connection.execute("select strategy from transactions where transaction_id = '101'").fetchone()[0], "Turtle")
     connection.close()
 
 
@@ -115,6 +149,39 @@ class ImportPipelineTests(unittest.TestCase):
       ImportService(config(source)).refresh(database)
 
 
+  def test_refresh_rejects_malformed_report_without_mutating_projection(self) -> None:
+    tmp_path = self.tmp_path
+    source = tmp_path / "history.xlsx"
+    database = tmp_path / "trades.sqlite"
+    workbook(source)
+    ImportService(config(source)).refresh(database)
+
+    malformed_sources = {
+        "missing_positions": ("missing_positions.xlsx", "Posições", False),
+        "missing_orders": ("missing_orders.xlsx", "Ordens", False),
+        "missing_transactions": ("missing_transactions.xlsx", "Transações", False),
+        "truncated_header": ("truncated_header.xlsx", "", True),
+    }
+    for name, (filename, section, truncated) in malformed_sources.items():
+        with self.subTest(name=name):
+            malformed = tmp_path / filename
+            workbook(malformed)
+            if truncated:
+                truncate_positions_header(malformed)
+            else:
+                remove_section_label(malformed, section)
+
+            with self.assertRaises(ValueError):
+                ImportService(config(malformed)).refresh(database)
+
+            connection = sqlite3.connect(database)
+            self.assertEqual(connection.execute("select count(*) from positions").fetchone()[0], 2)
+            self.assertEqual(connection.execute("select count(*) from orders").fetchone()[0], 2)
+            self.assertEqual(connection.execute("select count(*) from transactions").fetchone()[0], 3)
+            self.assertEqual(connection.execute("select strategy from transactions where transaction_id = '101'").fetchone()[0], "Turtle")
+            connection.close()
+
+
   def test_refresh_is_idempotent_by_replacing_projection(self) -> None:
     tmp_path = self.tmp_path
     source = tmp_path / "history.xlsx"
@@ -129,6 +196,11 @@ class ImportPipelineTests(unittest.TestCase):
     connection = sqlite3.connect(database)
     self.assertEqual(connection.execute("select count(*) from imports").fetchone()[0], 1)
     self.assertEqual(connection.execute("select count(*) from positions").fetchone()[0], 2)
+    self.assertEqual(connection.execute("select count(*) from orders").fetchone()[0], 2)
+    self.assertEqual(connection.execute("select count(*) from transactions").fetchone()[0], 3)
+    self.assertEqual(connection.execute("select count(*) from rejected_rows").fetchone()[0], 0)
+    self.assertEqual(connection.execute("select strategy from orders where order_id = '1001'").fetchone()[0], "Turtle")
+    self.assertEqual(connection.execute("select strategy from transactions where transaction_id = '101'").fetchone()[0], "Turtle")
     connection.close()
 
 
