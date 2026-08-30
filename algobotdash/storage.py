@@ -4,10 +4,12 @@ import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypeAlias
 
 from .parser import OrderRecord, PositionRecord, RejectedRecord, TransactionRecord
 
 CURRENT_SCHEMA_VERSION = 2
+ImportHistoryRow: TypeAlias = tuple[int, str, str, str, int, int, int, int]
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -91,7 +93,7 @@ CREATE TABLE rejected_rows (
 """
 
 
-def read_import_history(path: Path) -> list[tuple]:
+def read_import_history(path: Path) -> list[ImportHistoryRow]:
     if not path.exists():
         return []
     connection = sqlite3.connect(path)
@@ -120,7 +122,7 @@ def build_projection(
     transactions: Iterable[TransactionRecord],
     rejected: Iterable[RejectedRecord],
     rows_read: int,
-    prior_imports: Iterable[tuple] = (),
+    prior_imports: Iterable[ImportHistoryRow] = (),
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)

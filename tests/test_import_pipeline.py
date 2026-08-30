@@ -8,7 +8,8 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from algobotdash.config import ConfigurationError, ImportConfig, StrategyGroup
+from algobotdash.config import ConfigurationError, ImportConfig, StrategyGroup, load_config
+from algobotdash.parser import _number
 from algobotdash.service import ImportService
 
 
@@ -73,6 +74,8 @@ def truncate_positions_header(path: Path) -> None:
 
 
 class ImportPipelineTests(unittest.TestCase):
+  tmp_path: Path = Path()
+
   def setUp(self) -> None:
     self.tmp_path = Path(tempfile.mkdtemp(prefix="algobotdash-tests-"))
     self.addCleanup(shutil.rmtree, self.tmp_path)
@@ -104,6 +107,36 @@ class ImportPipelineTests(unittest.TestCase):
     self.assertEqual(connection.execute("select status from positions where position_id = '2'").fetchone()[0], "open")
     self.assertEqual(connection.execute("select no_comment_count, rejected_count from imports").fetchone(), (2, 0))
     connection.close()
+
+
+  def test_configuration_uses_longest_symbol_prefix(self) -> None:
+    configured = ImportConfig(
+        source_path=Path("history.xlsx"),
+        symbol_prefixes=(("W", "W"), ("WIN", "WIN")),
+        strategy_groups=(),
+    )
+
+    self.assertEqual(configured.normalize_symbol("WIN$"), "WIN")
+
+
+  def test_configuration_rejects_invalid_patterns(self) -> None:
+    for patterns in ("turtle", [], [""], ["turtle", 1]):
+      with self.subTest(patterns=patterns):
+        path = self.tmp_path / "config.yml"
+        path.write_text(
+            "source:\n  path: history.xlsx\nstrategies:\n  groups:\n"
+            f"    - name: Turtle\n      patterns: {patterns!r}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ConfigurationError, "patterns deve ser"):
+          load_config(path)
+
+
+  def test_number_rejects_non_finite_values(self) -> None:
+    self.assertEqual(_number("1.5"), 1.5)
+    self.assertIsNone(_number("nan"))
+    self.assertIsNone(_number("inf"))
+    self.assertIsNone(_number("-inf"))
 
 
   def test_new_source_preserves_import_history(self) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -86,7 +87,8 @@ def _number(value: Any) -> float | None:
     if value is None or value == "":
         return None
     try:
-        return float(str(value).strip())
+        parsed = float(str(value).strip())
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 
@@ -131,10 +133,13 @@ def _last_section_rows(rows: list[tuple[Any, ...]], section: str, end_marker: st
 
 def _read_rows(source: str | Path) -> list[tuple[Any, ...]]:
     workbook = load_workbook(source, read_only=True, data_only=True)
-    sheet = workbook.active
-    if sheet is None:
-        raise ValueError(f"o workbook não possui planilha ativa: {source}")
-    return [tuple(row) for row in sheet.iter_rows(values_only=True)]
+    try:
+        sheet = workbook.active
+        if sheet is None:
+            raise ValueError(f"o workbook não possui planilha ativa: {source}")
+        return [tuple(row) for row in sheet.iter_rows(values_only=True)]
+    finally:
+        workbook.close()
 
 
 def _require_header(rows: list[tuple[Any, ...]], section: str, expected: tuple[tuple[int, Any], ...]) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,14 +29,8 @@ class ImportConfig:
 
     def normalize_symbol(self, raw_symbol: Any) -> str | None:
         value = str(raw_symbol or "").strip().upper()
-        return next(
-            (
-                family
-                for prefix, family in self.symbol_prefixes
-                if value.startswith(prefix.upper())
-            ),
-            None,
-        )
+        matches = [(prefix, family) for prefix, family in self.symbol_prefixes if value.startswith(prefix.upper())]
+        return max(matches, key=lambda item: len(item[0]))[1] if matches else None
 
     def classify_strategy(self, comment: Any) -> str | None:
         value = str(comment or "").strip()
@@ -73,11 +68,21 @@ def load_config(path: str | Path) -> ImportConfig:
     if not isinstance(symbols, dict):
         raise ConfigurationError("symbols.prefixes deve ser um mapa")
     groups_raw = raw.get("strategies", {}).get("groups", [])
+    if not isinstance(groups_raw, Sequence) or isinstance(groups_raw, (str, bytes)):
+        raise ConfigurationError("strategies.groups deve ser uma sequência")
     groups: list[StrategyGroup] = []
     for item in groups_raw:
-        if not isinstance(item, dict) or not item.get("name") or not item.get("patterns"):
+        if not isinstance(item, dict) or not item.get("name") or "patterns" not in item:
             raise ConfigurationError("cada grupo precisa de name e patterns")
-        groups.append(StrategyGroup(str(item["name"]), tuple(map(str, item["patterns"]))))
+        patterns = item["patterns"]
+        if (
+            not isinstance(patterns, Sequence)
+            or isinstance(patterns, (str, bytes))
+            or not patterns
+            or not all(isinstance(pattern, str) and pattern.strip() for pattern in patterns)
+        ):
+            raise ConfigurationError("patterns deve ser uma sequência de strings não vazias")
+        groups.append(StrategyGroup(str(item["name"]), tuple(map(str, patterns))))
     return ImportConfig(
         source_path=source_path,
         symbol_prefixes=tuple((str(k), str(v)) for k, v in symbols.items()),

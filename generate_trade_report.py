@@ -6,6 +6,7 @@ import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import TypedDict
 from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
@@ -13,7 +14,34 @@ from openpyxl import load_workbook
 SRC=Path('ReportHistory-2002705608.xlsx'); OUT=Path('reports'); OUT.mkdir(exist_ok=True)
 REPORT_TZ=ZoneInfo('America/Bahia'); START=datetime(2026,4,1,tzinfo=REPORT_TZ); SEED=20260829
 COLORS={'BIT FVG':'#f59e0b','BIT Turtle':'#8b5cf6','WDO FVG':'#06b6d4','WDO RadarWDO':'#ef4444','WDO Turtle':'#22c55e','WIN EngulfPattern':'#f97316','WIN FVG':'#3b82f6','WIN RadarWIN':'#e11d48','WIN Soberano':'#a855f7','WIN Turtle':'#14b8a6'}
-def date(v):
+class Trade(TypedDict):
+    entry: datetime
+    symbol: str
+    pnl: float
+    strategy: str
+
+
+class Metrics(TypedDict):
+    n: int
+    net: float
+    pf: float
+    wr: float | None
+    pay: float | None
+    exp: float
+    dd: float
+    sh: float | None
+    so: float | None
+    dur: int
+
+
+class Bootstrap(TypedDict):
+    net: tuple[float, float]
+    exp: tuple[float, float]
+    pf: tuple[float, float]
+    p: float
+
+
+def date(v: object) -> datetime | None:
     if isinstance(v,datetime): return v if v.tzinfo else v.replace(tzinfo=REPORT_TZ)
     for f in ('%Y.%m.%d %H:%M:%S','%Y.%m.%d %H:%M'):
         try:
@@ -21,27 +49,29 @@ def date(v):
         except ValueError:
             continue
     return None
-def num(v):
+def num(v: object) -> float | None:
     try:
-        return float(v)
+        return float(str(v))
     except (TypeError, ValueError):
         return None
-def sym(v):
+def sym(v: object) -> str | None:
     s=str(v or '').upper(); return next((x for x in ('WIN','WDO','BIT') if s.startswith(x)),None)
-def strat(v):
+def strat(v: object) -> str | None:
     s=str(v or '').lower()
     for k,n in [('turtle','Turtle'),('fvg','FVG'),('radarwdo','RadarWDO'),('radarwin','RadarWIN'),('soberano','Soberano'),('engulf','EngulfPattern')]:
         if k in s:return n
-def key(t):return f"{t['symbol']} {t['strategy']}"
-def fbr(v,d=0):
+def key(t: Trade) -> str:return f"{t['symbol']} {t['strategy']}"
+def fbr(v: float | None,d: int=0):
     if v is None:return '—'
     return f'{v:,.{d}f}'.replace(',','X').replace('.',',').replace('X','.')
-def money(v):return ('-' if v<0 else '')+'R$ '+fbr(abs(v),0)
-def pct(v):
+def money(v: float):return ('-' if v<0 else '')+'R$ '+fbr(abs(v),0)
+def pct(v: float | None):
     return '—' if v is None else f'{fbr(v * 100, 1)}%'
-def m(xs):
+def metric_number(value: object, default: float=0.0) -> float:
+    return float(value) if isinstance(value, (int, float)) else default
+def m(xs: list[float]) -> Metrics:
     n=len(xs)
-    if not n:return {'n':0,'net':0,'pf':None,'wr':None,'pay':None,'exp':None,'dd':0,'sh':None,'so':None,'dur':0}
+    if not n:return {'n':0,'net':0.0,'pf':0.0,'wr':None,'pay':None,'exp':0.0,'dd':0.0,'sh':None,'so':None,'dur':0}
     wins=[x for x in xs if x>0]; losses=[x for x in xs if x<0];gp=sum(wins); gl=-sum(losses); avg=sum(xs)/n
     e=peak=dd=dur=cur=0
     for x in xs:
@@ -49,14 +79,14 @@ def m(xs):
         if e>=peak:peak=e;cur=0
         else:cur+=1;dur=max(dur,cur);dd=max(dd,peak-e)
     sd=math.sqrt(sum((x-avg)**2 for x in xs)/(n-1)) if n>1 else 0; down=math.sqrt(sum(min(0,x)**2 for x in xs)/n)
-    return {'n':n,'net':sum(xs),'pf':gp/gl if gl else (99 if gp else None),'wr':len(wins)/n,'pay':(sum(wins)/len(wins))/(gl/len(losses)) if wins and losses else None,'exp':avg,'dd':dd,'sh':avg/sd if sd else None,'so':avg/down if down else None,'dur':dur}
-def bs(xs,reps=2000):
+    return {'n':n,'net':sum(xs),'pf':gp/gl if gl else (99 if gp else 0.0),'wr':len(wins)/n,'pay':(sum(wins)/len(wins))/(gl/len(losses)) if wins and losses else None,'exp':avg,'dd':dd,'sh':avg/sd if sd else None,'so':avg/down if down else None,'dur':dur}
+def bs(xs: list[float],reps: int=2000) -> Bootstrap | None:
     if len(xs)<10:return None
     rng=random.Random(SEED+len(xs)); n=len(xs); o=[m([xs[rng.randrange(n)] for _ in range(n)]) for _ in range(reps)]
     def ci(k):
         a=sorted(x[k] for x in o if x[k] is not None); return a[int(.025*len(a))],a[int(.975*len(a))-1]
     return {'net':ci('net'),'exp':ci('exp'),'pf':ci('pf'),'p':sum(x['pf']>1 for x in o if x['pf'] is not None)/len(o)}
-def mc(xs,reps=2500):
+def mc(xs: list[float],reps: int=2500):
     if len(xs)<10:return None
     rng=random.Random(SEED+len(xs)*3); n=len(xs); dd=sorted(m([xs[rng.randrange(n)] for _ in range(n)])['dd'] for _ in range(reps))
     return {'p1':sum(x>=1000 for x in dd)/reps,'p2':sum(x>=2000 for x in dd)/reps,'p95':dd[int(.95*reps)]}
@@ -111,18 +141,23 @@ def main():
         and str(r[0]).strip() in {'Posições', 'Ordens', 'Transações'}
     }
     com={str(r[1]):str(r[11] or '') for r in rows[secs['Ordens']+2:secs['Transações']] if len(r)>11 and r[1]}
-    ts=[]
+    ts: list[Trade]=[]
     for r in rows[secs['Posições']+2:secs['Ordens']]:
-        if len(r)<13 or not r[1] or not sym(r[2]):continue
-        t={'entry':date(r[0]),'symbol':sym(r[2]),'pnl':num(r[12])};t['strategy']=strat(com.get(str(r[1]),''))
-        if not t['entry'] or t['pnl'] is None or not t['strategy'] or t['entry']<START:continue
-        if t['symbol']=='WIN' and t['strategy']=='Turtle' and t['entry']<datetime(2026,6,26,tzinfo=REPORT_TZ):continue
+        entry = date(r[0]) if len(r) > 0 else None
+        symbol = sym(r[2]) if len(r) > 2 else None
+        pnl = num(r[12]) if len(r) > 12 else None
+        strategy = strat(com.get(str(r[1]),'')) if len(r) > 1 else None
+        if entry is None or symbol is None or pnl is None or strategy is None or entry < START:continue
+        if symbol=='WIN' and strategy=='Turtle' and entry<datetime(2026,6,26,tzinfo=REPORT_TZ):continue
+        t: Trade = {'entry':entry,'symbol':symbol,'pnl':pnl,'strategy':strategy}
         ts.append(t)
     ts.sort(key=lambda x:x['entry'])
+    if not ts:
+        raise RuntimeError('nenhuma operação encontrada após os filtros do relatório')
     end=max(t['entry'] for t in ts)
     c30=end-timedelta(days=30)
     wk=end.date()-timedelta(days=end.weekday())
-    groups=defaultdict(list)
+    groups: defaultdict[str, list[Trade]]=defaultdict(list)
     for t in ts:groups[key(t)].append(t)
     keys=sorted(groups)
     full=m([t['pnl'] for t in ts])
@@ -154,8 +189,8 @@ def main():
     for k in keys:
         xs=[t['pnl'] for t in groups[k]];a=m(xs);r30=m([t['pnl'] for t in sub(groups[k],'30')]);rw=m([t['pnl'] for t in sub(groups[k],'week')]);b=bs(xs);tail=mc(xs);pf20=m(xs[-20:])['pf'] if len(xs)>=20 else None
         if len(xs)<20:st,cl='Sombra','warn'
-        elif a['pf']<.9 or (b and b['p']<.4):st,cl='Reduzir/Pausar','bad'
-        elif a['pf']<1 or (pf20 and pf20<.9):st,cl='Sem aumento','warn'
+        elif metric_number(a['pf'])<.9 or (b and b['p']<.4):st,cl='Reduzir/Pausar','bad'
+        elif metric_number(a['pf'])<1 or (pf20 is not None and pf20<.9):st,cl='Sem aumento','warn'
         else:st,cl='Continuar','good'
         first=min(t['entry'] for t in groups[k]);info.append((k,a,r30,rw,b,tail,pf20,st,cl,first))
     info.sort(key=lambda x: (-1 if x[1]['pf'] is None else -x[1]['pf'], x[0]))
@@ -204,9 +239,10 @@ def main():
     doc=doc.replace('<thead><tr><th>Estratégia</th><th>Trades</th><th>P&L líquido</th><th>PF</th><th>Acerto</th><th>DD</th><th>Sharpe</th><th>Sortino</th><th>Decisão</th></tr></thead>', '<thead><tr><th>Estratégia</th><th>Início</th><th>Trades</th><th>P&L líquido</th><th>PF</th><th>Acerto</th><th>DD</th><th>Sharpe</th><th>Sortino</th><th>Decisão</th></tr></thead>')
     doc=re.sub(r'(<div class="panelhead">Curva de capital realizada</div><div class="body">).*?(</div></div><div class="panel"><div class="panelhead">Leitura analítica)', lambda x:x.group(1)+curve+x.group(2),doc,count=1,flags=re.DOTALL)
     doc=re.sub(r'<section class="panel"><div class="panelhead">Subdivisões temporais</div>.*?(?=<section class="panel"><div class="panelhead">Robustez e risco de cauda)', temporal_section, doc, count=1, flags=re.DOTALL)
+    doc=doc.replace('Posições realizadas foram associadas ao comentário da ordem de abertura.', 'Posições não recebem estratégia sem um vínculo explícito no relatório; ordens e transações são classificadas apenas por seus próprios campos e vínculos explícitos.')
     doc = doc.replace(
         '</section></main><footer>',
-        f'{analysis_html}</section></main><footer>',
+        f'</section>{analysis_html}</main><footer>',
         1,
     )
     path=OUT/'avaliacao_estrategias_2026-08-28.html'

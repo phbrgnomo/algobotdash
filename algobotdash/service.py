@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,8 +27,15 @@ class ImportService:
 
     def refresh(self, database_path: str | Path) -> ImportSummary:
         source = self.config.source_path
-        source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-        positions, orders, transactions, rejected, rows_read = read_report(source, self.config)
+        snapshot_fd, snapshot_name = tempfile.mkstemp(prefix=f".{source.stem}.", suffix=source.suffix)
+        os.close(snapshot_fd)
+        snapshot = Path(snapshot_name)
+        try:
+            shutil.copyfile(source, snapshot)
+            source_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+            positions, orders, transactions, rejected, rows_read = read_report(snapshot, self.config)
+        finally:
+            snapshot.unlink(missing_ok=True)
         database = Path(database_path)
         database.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary_name = tempfile.mkstemp(prefix=f".{database.name}.", suffix=".tmp", dir=database.parent)
