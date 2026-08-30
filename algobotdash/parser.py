@@ -11,7 +11,6 @@ from openpyxl import load_workbook
 
 from .config import ImportConfig
 
-
 REPORT_TZ = ZoneInfo("America/Bahia")
 
 

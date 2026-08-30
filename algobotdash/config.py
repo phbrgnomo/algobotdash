@@ -28,10 +28,14 @@ class ImportConfig:
 
     def normalize_symbol(self, raw_symbol: Any) -> str | None:
         value = str(raw_symbol or "").strip().upper()
-        for prefix, family in self.symbol_prefixes:
-            if value.startswith(prefix.upper()):
-                return family
-        return None
+        return next(
+            (
+                family
+                for prefix, family in self.symbol_prefixes
+                if value.startswith(prefix.upper())
+            ),
+            None,
+        )
 
     def classify_strategy(self, comment: Any) -> str | None:
         value = str(comment or "").strip()
