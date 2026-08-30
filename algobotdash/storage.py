@@ -106,9 +106,7 @@ def read_import_history(path: Path) -> list[tuple]:
             raise ValueError(f"versão de schema SQLite não suportada: {version}")
         if "positions_created" in columns:
             return connection.execute("SELECT id, source_name, source_hash, imported_at, rows_read, positions_created, no_comment_count, rejected_count FROM imports ORDER BY id").fetchall()
-        if version is None and "cycles_created" in columns:
-            return connection.execute("SELECT id, source_name, source_hash, imported_at, rows_read, cycles_created, no_comment_count, rejected_count FROM imports ORDER BY id").fetchall()
-        raise ValueError(f"schema SQLite incompatível em {path}: coluna de contagem de posições ausente")
+        raise ValueError(f"schema SQLite incompatível em {path}: coluna positions_created ausente")
     finally:
         connection.close()
 

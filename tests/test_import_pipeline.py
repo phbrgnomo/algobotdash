@@ -94,26 +94,6 @@ class ImportPipelineTests(unittest.TestCase):
     connection.close()
 
 
-  def test_refresh_migrates_legacy_import_history(self) -> None:
-    tmp_path = self.tmp_path
-    source = tmp_path / "history.xlsx"
-    database = tmp_path / "trades.sqlite"
-    workbook(source)
-    connection = sqlite3.connect(database)
-    connection.execute("create table imports (id integer primary key, source_name text not null, source_hash text not null unique, imported_at text not null, rows_read integer not null, cycles_created integer not null, no_comment_count integer not null, rejected_count integer not null)")
-    connection.execute("insert into imports values (7, 'legacy.xlsx', 'legacy-hash', '2026-01-01T00:00:00+00:00', 12, 4, 2, 1)")
-    connection.commit()
-    connection.close()
-
-    ImportService(config(source)).refresh(database)
-
-    connection = sqlite3.connect(database)
-    self.assertEqual(connection.execute("select count(*) from imports").fetchone()[0], 2)
-    self.assertEqual(connection.execute("select positions_created, no_comment_count, rejected_count from imports where id = 7").fetchone(), (4, 2, 1))
-    self.assertEqual(connection.execute("select version from schema_version").fetchone()[0], 2)
-    connection.close()
-
-
   def test_refresh_rejects_unsupported_schema_version(self) -> None:
     tmp_path = self.tmp_path
     source = tmp_path / "history.xlsx"

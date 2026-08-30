@@ -20,12 +20,6 @@ class ImportSummary:
     rejected_count: int
     database_path: Path
 
-    @property
-    def cycles_created(self) -> int:
-        """Compatibility name for callers from the pre-MVP cycle model."""
-        return self.positions_created
-
-
 class ImportService:
     def __init__(self, config: ImportConfig):
         self.config = config
