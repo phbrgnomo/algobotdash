@@ -84,7 +84,7 @@ def _cell(row: tuple[Any, ...], index: int) -> Any:
 
 
 def _number(value: Any) -> float | None:
-    if value is None or value == "":
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
     try:
         parsed = float(str(value).strip())
@@ -218,8 +218,19 @@ def _parse_transactions(rows: Iterable[tuple[int, tuple[Any, ...]]], order_strat
             if any(value not in (None, "") for value in row):
                 rejected.append(RejectedRecord(row_number, "campos obrigatórios inválidos em transação", transaction_id))
             continue
+        numeric_values = {index: _number(_cell(row, index)) for index in (5, 6, 8, 9, 10, 11, 12)}
+        invalid_numeric = [
+            index
+            for index, parsed in numeric_values.items()
+            if _cell(row, index) not in (None, "")
+            and not (isinstance(_cell(row, index), str) and not _cell(row, index).strip())
+            and parsed is None
+        ]
+        if invalid_numeric:
+            rejected.append(RejectedRecord(row_number, "valores numéricos inválidos em transação", transaction_id))
+            continue
         strategy = order_strategies.get(order_id)
-        transactions.append(TransactionRecord(transaction_id, at, str(_cell(row, 2) or "").strip(), str(_cell(row, 4) or _cell(row, 3) or "").strip().lower(), _number(_cell(row, 5)), _number(_cell(row, 6)), order_id or None, _number(_cell(row, 8)) or 0.0, _number(_cell(row, 9)) or 0.0, _number(_cell(row, 10)) or 0.0, _number(_cell(row, 11)) or 0.0, _number(_cell(row, 12)), str(_cell(row, 13) or "").strip(), None, strategy))
+        transactions.append(TransactionRecord(transaction_id, at, str(_cell(row, 2) or "").strip(), str(_cell(row, 4) or _cell(row, 3) or "").strip().lower(), numeric_values[5], numeric_values[6], order_id or None, numeric_values[8] if numeric_values[8] is not None else 0.0, numeric_values[9] if numeric_values[9] is not None else 0.0, numeric_values[10] if numeric_values[10] is not None else 0.0, numeric_values[11] if numeric_values[11] is not None else 0.0, numeric_values[12], str(_cell(row, 13) or "").strip(), None, strategy))
     return transactions, rejected
 
 

@@ -38,7 +38,7 @@ class Metrics(TypedDict):
 class Bootstrap(TypedDict):
     net: tuple[float, float]
     exp: tuple[float, float]
-    pf: tuple[float, float]
+    pf: tuple[float, float] | None
     p: float
 
 
@@ -52,7 +52,8 @@ def date(v: object) -> datetime | None:
     return None
 def num(v: object) -> float | None:
     try:
-        return float(str(v))
+        parsed = float(str(v))
+        return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 def sym(v: object) -> str | None:
@@ -84,9 +85,14 @@ def m(xs: list[float]) -> Metrics:
 def bs(xs: list[float],reps: int=2000) -> Bootstrap | None:
     if len(xs)<10:return None
     rng=random.Random(SEED+len(xs)); n=len(xs); o=[m([xs[rng.randrange(n)] for _ in range(n)]) for _ in range(reps)]
-    def ci(k):
-        a=sorted(x[k] for x in o if x[k] is not None); return a[int(.025*len(a))],a[int(.975*len(a))-1]
-    return {'net':ci('net'),'exp':ci('exp'),'pf':ci('pf'),'p':sum(x['pf']>1 for x in o if x['pf'] is not None)/len(o)}
+    def ci(k: str) -> tuple[float, float]:
+        a=sorted(x[k] for x in o if x[k] is not None)
+        return a[int(.025*len(a))],a[int(.975*len(a))-1]
+    def optional_ci(k: str) -> tuple[float, float] | None:
+        a=sorted(x[k] for x in o if x[k] is not None)
+        if not a:return None
+        return a[int(.025*len(a))],a[int(.975*len(a))-1]
+    return {'net':ci('net'),'exp':ci('exp'),'pf':optional_ci('pf'),'p':sum(x['pf']>1 for x in o if x['pf'] is not None)/len(o)}
 def mc(xs: list[float],reps: int=2500):
     if len(xs)<10:return None
     rng=random.Random(SEED+len(xs)*3); n=len(xs); dd=sorted(m([xs[rng.randrange(n)] for _ in range(n)])['dd'] for _ in range(reps))

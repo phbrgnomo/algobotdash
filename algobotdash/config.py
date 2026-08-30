@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -61,19 +61,28 @@ def load_config(path: str | Path) -> ImportConfig:
     if not isinstance(raw, dict):
         raise ConfigurationError("a configuração deve ser um mapa")
 
-    source = raw.get("source", {}).get("path")
-    if not source:
-        raise ConfigurationError("source.path é obrigatório")
-    source_path = Path(source)
+    source_section = raw.get("source", {})
+    if not isinstance(source_section, Mapping):
+        raise ConfigurationError("source deve ser um mapa")
+    source = source_section.get("path")
+    if not isinstance(source, str) or not source.strip():
+        raise ConfigurationError("source.path deve ser uma string não vazia")
+    source_path = Path(source.strip())
     if not source_path.is_absolute():
         source_path = config_path.parent / source_path
 
-    symbols = raw.get("symbols", {}).get("prefixes", {})
+    symbols_section = raw.get("symbols", {})
+    if not isinstance(symbols_section, Mapping):
+        raise ConfigurationError("symbols deve ser um mapa")
+    symbols = symbols_section.get("prefixes", {})
     if not isinstance(symbols, dict):
         raise ConfigurationError("symbols.prefixes deve ser um mapa")
     if any(str(prefix) == "" for prefix in symbols):
         raise ConfigurationError("symbols.prefixes não pode conter prefixos vazios")
-    groups_raw = raw.get("strategies", {}).get("groups", [])
+    strategies_section = raw.get("strategies", {})
+    if not isinstance(strategies_section, Mapping):
+        raise ConfigurationError("strategies deve ser um mapa")
+    groups_raw = strategies_section.get("groups", [])
     if not isinstance(groups_raw, Sequence) or isinstance(groups_raw, (str, bytes)):
         raise ConfigurationError("strategies.groups deve ser uma sequência")
     groups: list[StrategyGroup] = []

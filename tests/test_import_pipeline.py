@@ -14,7 +14,7 @@ from algobotdash.config import (
     StrategyGroup,
     load_config,
 )
-from algobotdash.parser import _number
+from algobotdash.parser import _number, read_report
 from algobotdash.service import ImportService
 
 
@@ -84,6 +84,15 @@ def append_rejected_transaction(path: Path) -> None:
     if sheet is None:
         raise RuntimeError("workbook fixture has no active worksheet")
     sheet.append(("2026.08.01 13:00:00", None, "WINQ26", "sell", "out", 1, 130100, 1001, 0, 0, 0, 0, 10105, "invalid transaction"))
+    book.save(path)
+
+
+def append_invalid_numeric_transaction(path: Path) -> None:
+    book = load_workbook(path)
+    sheet = book.active
+    if sheet is None:
+        raise RuntimeError("workbook fixture has no active worksheet")
+    sheet.append(("2026.08.01 13:00:00", 104, "WINQ26", "sell", "out", 1, 130100, 1001, "nan", 0, 0, 0, 10105, "invalid numeric"))
     book.save(path)
 
 
@@ -166,11 +175,40 @@ class ImportPipelineTests(unittest.TestCase):
       load_config(path)
 
 
+  def test_configuration_rejects_invalid_sections_and_source_path(self) -> None:
+    cases = (
+        ("source", "invalid", "source deve ser um mapa"),
+        ("symbols", "invalid", "symbols deve ser um mapa"),
+        ("strategies", "invalid", "strategies deve ser um mapa"),
+        ("source", "{path: 42}", "source.path deve ser uma string"),
+    )
+    for section, value, message in cases:
+      with self.subTest(section=section, value=value):
+        path = self.tmp_path / f"{section}-{len(value)}.yml"
+        prefix = "source:\n  path: history.xlsx\n"
+        path.write_text(f"{prefix}{section}: {value}\n", encoding="utf-8")
+        with self.assertRaisesRegex(ConfigurationError, message):
+          load_config(path)
+
+
   def test_number_rejects_non_finite_values(self) -> None:
     self.assertEqual(_number("1.5"), 1.5)
     self.assertIsNone(_number("nan"))
     self.assertIsNone(_number("inf"))
     self.assertIsNone(_number("-inf"))
+
+
+  def test_transactions_reject_non_finite_numeric_values(self) -> None:
+    source = self.tmp_path / "history.xlsx"
+    workbook(source)
+    append_invalid_numeric_transaction(source)
+
+    _, _, transactions, rejected, _ = read_report(source, config(source))
+
+    self.assertEqual(len(transactions), 3)
+    self.assertEqual(len(rejected), 1)
+    self.assertEqual(rejected[0].raw_position_id, "104")
+    self.assertEqual(rejected[0].reason, "valores numéricos inválidos em transação")
 
 
   def test_new_source_preserves_import_history(self) -> None:
