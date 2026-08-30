@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from openpyxl import load_workbook
 
@@ -18,7 +19,8 @@ class PositionRecord:
     symbol_raw: str
     symbol_family: str | None
     direction: str
-    volume: float | None
+    volume_requested: float | None
+    volume_executed: float | None
     entry_price: float | None
     exit_price: float | None
     commission: float
@@ -27,6 +29,43 @@ class PositionRecord:
     comment: str
     strategy: str | None
     status: str
+
+
+@dataclass(frozen=True)
+class OrderRecord:
+    order_id: str
+    opened_at: datetime
+    symbol_raw: str
+    direction: str
+    volume_requested: float | None
+    volume_executed: float | None
+    price: float | None
+    stop_loss: float | None
+    take_profit: float | None
+    event_at: datetime | None
+    status: str
+    comment: str
+    position_id: str | None
+    strategy: str | None
+
+
+@dataclass(frozen=True)
+class TransactionRecord:
+    transaction_id: str
+    at: datetime
+    symbol_raw: str
+    direction: str
+    volume: float | None
+    price: float | None
+    order_id: str | None
+    commission: float
+    tax: float
+    swap: float
+    pnl: float
+    balance: float | None
+    comment: str
+    position_id: str | None
+    strategy: str | None
 
 
 @dataclass(frozen=True)
@@ -40,9 +79,20 @@ def _number(value: Any) -> float | None:
     if value is None or value == "":
         return None
     try:
-        return float(str(value).replace("/", "").strip())
+        return float(str(value).strip())
     except (TypeError, ValueError):
         return None
+
+
+def _volume_pair(value: Any) -> tuple[float | None, float | None]:
+    """Return requested and executed quantities without discarding either value."""
+    if value is None or value == "":
+        return None, None
+    parts = [part.strip() for part in str(value).split("/")]
+    if len(parts) == 1:
+        amount = _number(parts[0])
+        return amount, amount
+    return _number(parts[0]), _number(parts[1])
 
 
 def _datetime(value: Any) -> datetime | None:
@@ -65,20 +115,26 @@ def _section_rows(rows: list[tuple[Any, ...]], section: str, next_section: str) 
         yield index + 1, rows[index]
 
 
-def read_positions(source: str | Path, config: ImportConfig) -> tuple[list[PositionRecord], list[RejectedRecord]]:
+def _last_section_rows(rows: list[tuple[Any, ...]], section: str, end_marker: str) -> Iterable[tuple[int, tuple[Any, ...]]]:
+    start = next(i for i, row in enumerate(rows) if row and row[0] == section)
+    end = next((i for i in range(start + 1, len(rows)) if rows[i] and rows[i][0] == end_marker), len(rows))
+    for index in range(start + 2, end):
+        yield index + 1, rows[index]
+
+
+def read_report(source: str | Path, config: ImportConfig) -> tuple[list[PositionRecord], list[OrderRecord], list[TransactionRecord], list[RejectedRecord], int]:
     workbook = load_workbook(source, read_only=True, data_only=True)
     rows = list(workbook.active.iter_rows(values_only=True))
     try:
-        comments = {
-            str(row[1]): str(row[11] or "").strip()
-            for _, row in _section_rows(rows, "Ordens", "Transações")
-            if len(row) > 11 and row[1]
-        }
-        position_rows = _section_rows(rows, "Posições", "Ordens")
+        order_rows = list(_section_rows(rows, "Ordens", "Transações"))
+        comments = {str(row[1]): str(row[11] or "").strip() for _, row in order_rows if len(row) > 11 and row[1]}
+        position_rows = list(_section_rows(rows, "Posições", "Ordens"))
+        transaction_rows = list(_last_section_rows(rows, "Transações", "Posições Abertas"))
     except StopIteration as exc:
         raise ValueError("o workbook precisa conter as seções Posições e Ordens") from exc
 
     records: list[PositionRecord] = []
+    position_ids: set[str] = set()
     rejected: list[RejectedRecord] = []
     for row_number, row in position_rows:
         position_id = str(row[1] or "").strip() if len(row) > 1 else ""
@@ -92,6 +148,7 @@ def read_positions(source: str | Path, config: ImportConfig) -> tuple[list[Posit
             continue
         comment = comments.get(position_id, "")
         strategy = config.classify_strategy(comment)
+        volume_requested, volume_executed = _volume_pair(row[4] if len(row) > 4 else None)
         records.append(
             PositionRecord(
                 position_id=position_id,
@@ -100,7 +157,8 @@ def read_positions(source: str | Path, config: ImportConfig) -> tuple[list[Posit
                 symbol_raw=symbol,
                 symbol_family=config.normalize_symbol(symbol),
                 direction=str(row[3] or "").strip().lower(),
-                volume=_number(row[4] if len(row) > 4 else None),
+                volume_requested=volume_requested,
+                volume_executed=volume_executed,
                 entry_price=_number(row[5] if len(row) > 5 else None),
                 exit_price=_number(row[9] if len(row) > 9 else None),
                 commission=_number(row[10] if len(row) > 10 else None) or 0.0,
@@ -111,4 +169,40 @@ def read_positions(source: str | Path, config: ImportConfig) -> tuple[list[Posit
                 status="closed" if _datetime(row[8] if len(row) > 8 else None) else "open",
             )
         )
+        position_ids.add(position_id)
+
+    orders: list[OrderRecord] = []
+    for row_number, row in order_rows:
+        order_id = str(row[1] or "").strip() if len(row) > 1 else ""
+        opened_at = _datetime(row[0] if row else None)
+        symbol = str(row[2] or "").strip() if len(row) > 2 else ""
+        if not order_id or not opened_at or not symbol:
+            if any(value not in (None, "") for value in row):
+                rejected.append(RejectedRecord(row_number, "campos obrigatórios inválidos em ordem", order_id))
+            continue
+        requested, executed = _volume_pair(row[4] if len(row) > 4 else None)
+        comment = str(row[11] or "").strip() if len(row) > 11 else ""
+        strategy = config.classify_strategy(comment)
+        orders.append(OrderRecord(order_id, opened_at, symbol, str(row[3] or "").strip().lower(), requested, executed, _number(row[5] if len(row) > 5 else None), _number(row[6] if len(row) > 6 else None), _number(row[7] if len(row) > 7 else None), _datetime(row[8] if len(row) > 8 else None), str(row[9] or "").strip().lower(), comment, order_id if order_id in position_ids else None, strategy))
+
+    transactions: list[TransactionRecord] = []
+    for row_number, row in transaction_rows:
+        transaction_id = str(row[1] or "").strip() if len(row) > 1 else ""
+        at = _datetime(row[0] if row else None)
+        order_id = str(row[7] or "").strip() if len(row) > 7 else ""
+        if not transaction_id and not at:
+            continue
+        if not transaction_id or not at:
+            if any(value not in (None, "") for value in row):
+                rejected.append(RejectedRecord(row_number, "campos obrigatórios inválidos em transação", transaction_id))
+            continue
+        position_id = order_id if order_id in position_ids else None
+        strategy = config.classify_strategy(comments.get(order_id, "")) if position_id else None
+        transactions.append(TransactionRecord(transaction_id, at, str(row[2] or "").strip(), str(row[4] or row[3] or "").strip().lower(), _number(row[5] if len(row) > 5 else None), _number(row[6] if len(row) > 6 else None), order_id or None, _number(row[8] if len(row) > 8 else None) or 0.0, _number(row[9] if len(row) > 9 else None) or 0.0, _number(row[10] if len(row) > 10 else None) or 0.0, _number(row[11] if len(row) > 11 else None) or 0.0, _number(row[12] if len(row) > 12 else None), str(row[13] or "").strip() if len(row) > 13 else "", position_id, strategy))
+    return records, orders, transactions, rejected, len(position_rows) + len(order_rows) + len(transaction_rows)
+
+
+def read_positions(source: str | Path, config: ImportConfig) -> tuple[list[PositionRecord], list[RejectedRecord]]:
+    """Compatibility helper for callers that only need the position summary."""
+    records, _, _, rejected, _ = read_report(source, config)
     return records, rejected

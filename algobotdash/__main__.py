@@ -12,7 +12,7 @@ def main() -> None:
     parser.add_argument("--database", default="data/algobotdash.sqlite")
     args = parser.parse_args()
     summary = ImportService(load_config(args.config)).refresh(args.database)
-    print(f"Importação válida: {summary.cycles_created} ciclos, {summary.rejected_count} rejeições")
+    print(f"Importação válida: {summary.positions_created} posições, {summary.rejected_count} rejeições")
 
 
 if __name__ == "__main__":

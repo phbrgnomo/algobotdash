@@ -1,25 +1,26 @@
 from __future__ import annotations
 
-import sqlite3
+from collections.abc import Iterable
 from datetime import datetime, timezone
+import sqlite3
 from pathlib import Path
-from typing import Iterable
 
-from .parser import PositionRecord, RejectedRecord
+from .parser import OrderRecord, PositionRecord, RejectedRecord, TransactionRecord
 
 
 SCHEMA = """
+PRAGMA foreign_keys = ON;
 CREATE TABLE imports (
   id INTEGER PRIMARY KEY,
   source_name TEXT NOT NULL,
   source_hash TEXT NOT NULL UNIQUE,
   imported_at TEXT NOT NULL,
   rows_read INTEGER NOT NULL,
-  cycles_created INTEGER NOT NULL,
+  positions_created INTEGER NOT NULL,
   no_comment_count INTEGER NOT NULL,
   rejected_count INTEGER NOT NULL
 );
-CREATE TABLE cycles (
+CREATE TABLE positions (
   id INTEGER PRIMARY KEY,
   position_id TEXT NOT NULL UNIQUE,
   strategy TEXT,
@@ -29,23 +30,51 @@ CREATE TABLE cycles (
   entry_at TEXT NOT NULL,
   exit_at TEXT,
   status TEXT NOT NULL,
-  volume REAL,
+  volume_requested REAL,
+  volume_executed REAL,
+  entry_price REAL,
+  exit_price REAL,
+  commission REAL NOT NULL,
+  swap REAL NOT NULL,
   pnl REAL NOT NULL,
   import_id INTEGER NOT NULL REFERENCES imports(id)
 );
 CREATE TABLE orders (
   id INTEGER PRIMARY KEY,
-  cycle_id INTEGER NOT NULL REFERENCES cycles(id),
-  position_id TEXT NOT NULL,
-  entry_at TEXT NOT NULL,
-  exit_at TEXT,
-  entry_price REAL,
-  exit_price REAL,
+  order_id TEXT NOT NULL UNIQUE,
+  position_id TEXT REFERENCES positions(position_id),
+  strategy TEXT,
+  symbol_raw TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  opened_at TEXT NOT NULL,
+  event_at TEXT,
+  status TEXT NOT NULL,
+  volume_requested REAL,
+  volume_executed REAL,
+  price REAL,
+  stop_loss REAL,
+  take_profit REAL,
+  comment TEXT NOT NULL,
+  import_id INTEGER NOT NULL REFERENCES imports(id)
+);
+CREATE TABLE transactions (
+  id INTEGER PRIMARY KEY,
+  transaction_id TEXT NOT NULL UNIQUE,
+  order_id TEXT,
+  position_id TEXT,
+  strategy TEXT,
+  at TEXT NOT NULL,
+  symbol_raw TEXT NOT NULL,
+  direction TEXT NOT NULL,
   volume REAL,
+  price REAL,
   commission REAL NOT NULL,
+  tax REAL NOT NULL,
   swap REAL NOT NULL,
   pnl REAL NOT NULL,
-  comment TEXT NOT NULL
+  balance REAL,
+  comment TEXT NOT NULL,
+  import_id INTEGER NOT NULL REFERENCES imports(id)
 );
 CREATE TABLE rejected_rows (
   id INTEGER PRIMARY KEY,
@@ -57,29 +86,60 @@ CREATE TABLE rejected_rows (
 """
 
 
-def build_projection(path: Path, source_name: str, source_hash: str, records: Iterable[PositionRecord], rejected: Iterable[RejectedRecord], rows_read: int) -> None:
+def read_import_history(path: Path) -> list[tuple]:
+    if not path.exists():
+        return []
+    connection = sqlite3.connect(path)
+    try:
+        return connection.execute("SELECT id, source_name, source_hash, imported_at, rows_read, positions_created, no_comment_count, rejected_count FROM imports ORDER BY id").fetchall()
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        connection.close()
+
+
+def build_projection(
+    path: Path,
+    source_name: str,
+    source_hash: str,
+    positions: Iterable[PositionRecord],
+    orders: Iterable[OrderRecord],
+    transactions: Iterable[TransactionRecord],
+    rejected: Iterable[RejectedRecord],
+    rows_read: int,
+    prior_imports: Iterable[tuple] = (),
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     try:
         connection.executescript(SCHEMA)
-        records = list(records)
+        positions = list(positions)
+        orders = list(orders)
+        transactions = list(transactions)
         rejected = list(rejected)
+        connection.executemany("INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)", prior_imports)
         imported_at = datetime.now(timezone.utc).isoformat()
-        no_comment_count = sum(record.strategy is None for record in records)
-        cursor = connection.execute(
-            "INSERT INTO imports(source_name, source_hash, imported_at, rows_read, cycles_created, no_comment_count, rejected_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (source_name, source_hash, imported_at, rows_read, len(records), no_comment_count, len(rejected)),
-        )
-        import_id = cursor.lastrowid
-        for record in records:
+        existing = connection.execute("SELECT id FROM imports WHERE source_hash = ?", (source_hash,)).fetchone()
+        if existing:
+            import_id = existing[0]
+        else:
             cursor = connection.execute(
-                "INSERT INTO cycles(position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, status, volume, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (record.position_id, record.strategy, record.symbol_family, record.symbol_raw, record.direction, record.entry_at.isoformat(), record.exit_at.isoformat() if record.exit_at else None, record.status, record.volume, record.pnl, import_id),
+                "INSERT INTO imports(source_name, source_hash, imported_at, rows_read, positions_created, no_comment_count, rejected_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (source_name, source_hash, imported_at, rows_read, len(positions), sum(item.strategy is None for item in positions), len(rejected)),
             )
-            connection.execute(
-                "INSERT INTO orders(cycle_id, position_id, entry_at, exit_at, entry_price, exit_price, volume, commission, swap, pnl, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (cursor.lastrowid, record.position_id, record.entry_at.isoformat(), record.exit_at.isoformat() if record.exit_at else None, record.entry_price, record.exit_price, record.volume, record.commission, record.swap, record.pnl, record.comment),
-            )
+            import_id = cursor.lastrowid
+        connection.executemany(
+            "INSERT INTO positions(position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, status, volume_requested, volume_executed, entry_price, exit_price, commission, swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(p.position_id, p.strategy, p.symbol_family, p.symbol_raw, p.direction, p.entry_at.isoformat(), p.exit_at.isoformat() if p.exit_at else None, p.status, p.volume_requested, p.volume_executed, p.entry_price, p.exit_price, p.commission, p.swap, p.pnl, import_id) for p in positions],
+        )
+        connection.executemany(
+            "INSERT INTO orders(order_id, position_id, strategy, symbol_raw, direction, opened_at, event_at, status, volume_requested, volume_executed, price, stop_loss, take_profit, comment, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(o.order_id, o.position_id, o.strategy, o.symbol_raw, o.direction, o.opened_at.isoformat(), o.event_at.isoformat() if o.event_at else None, o.status, o.volume_requested, o.volume_executed, o.price, o.stop_loss, o.take_profit, o.comment, import_id) for o in orders],
+        )
+        connection.executemany(
+            "INSERT INTO transactions(transaction_id, order_id, position_id, strategy, at, symbol_raw, direction, volume, price, commission, tax, swap, pnl, balance, comment, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(t.transaction_id, t.order_id, t.position_id, t.strategy, t.at.isoformat(), t.symbol_raw, t.direction, t.volume, t.price, t.commission, t.tax, t.swap, t.pnl, t.balance, t.comment, import_id) for t in transactions],
+        )
         connection.executemany(
             "INSERT INTO rejected_rows(import_id, row_number, position_id, reason) VALUES (?, ?, ?, ?)",
             [(import_id, item.row_number, item.raw_position_id, item.reason) for item in rejected],

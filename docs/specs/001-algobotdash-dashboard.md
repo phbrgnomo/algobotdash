@@ -2,17 +2,17 @@
 
 ## Problem Statement
 
-O histórico de trades é atualizado manualmente em Excel e hoje depende de scripts e relatórios estáticos. Isso dificulta reconstruir os dados de forma idempotente, rastrear a origem das métricas, agrupar corretamente ciclos com piramidação e comparar estratégias por filtros temporais e operacionais.
+O histórico de trades é atualizado manualmente em Excel e hoje depende de scripts e relatórios estáticos. Isso dificulta reconstruir os dados de forma idempotente, rastrear a origem das métricas, preservar as três granularidades do relatório e comparar estratégias por filtros temporais e operacionais.
 
 ## Solution
 
-Construir um dashboard local executado preferencialmente via Docker Compose, com FastAPI/Uvicorn no backend e JavaScript sem framework no frontend. O Excel permanece como fonte canônica; cada atualização válida reconstrói uma projeção SQLite e registra metadados da importação. O dashboard consulta ciclos consolidados, ordens de detalhe e métricas calculadas sob demanda.
+Construir um dashboard local executado preferencialmente via Docker Compose, com FastAPI/Uvicorn no backend e JavaScript sem framework no frontend. O Excel permanece como fonte canônica; cada atualização válida reconstrói uma projeção SQLite e registra metadados da importação. O dashboard consulta posições, ordens, transações e métricas calculadas sob demanda.
 
 ## User Stories
 
 1. As the operator, I want to configure the Excel source path in YAML, so that the application does not depend on a hard-coded personal path.
 2. As the operator, I want to configure symbol normalization in YAML, so that contract expirations are analyzed under their operational families.
-3. As the operator, I want to define strategy groups and comment patterns in YAML, so that piramided orders can be treated as one logical strategy.
+3. As the operator, I want to define strategy groups and comment patterns in YAML, so that positions can be classified consistently by strategy.
 4. As the operator, I want ambiguous comment matches to stop the refresh with a clear warning, so that metrics are never produced from silent classification errors.
 5. As the operator, I want to trigger a full rebuild from the CLI, so that the derived database can be recreated after correcting the source workbook.
 6. As the operator, I want to trigger a full rebuild from the dashboard, so that routine updates do not require a terminal.
@@ -20,18 +20,18 @@ Construir um dashboard local executado preferencialmente via Docker Compose, com
 8. As the operator, I want a second refresh to be rejected while one is running, so that concurrent rebuilds cannot corrupt the projection.
 9. As the operator, I want the last valid projection to remain available after a failed refresh, so that an input error does not take down the dashboard.
 10. As the operator, I want each import to record the source hash and execution timestamp, so that every result is traceable to an exact workbook.
-11. As the operator, I want each import to record rows read, cycles created, records without comments and rejections, so that data quality is visible.
-12. As the operator, I want cycles with an entry but no exit to remain visible as open, so that incomplete history is not lost.
-13. As the operator, I want open cycles excluded from realized P&L and drawdown, so that unrealized results do not contaminate realized metrics.
+11. As the operator, I want each import to record rows read, positions created, records without comments and rejections, so that data quality is visible.
+12. As the operator, I want every position, order and transaction preserved at its source granularity, so that incomplete or unmatched execution data is not lost.
+13. As the operator, I want position-level P&L aggregated by strategy and normalized symbol, so that the MVP does not infer unsupported cycles.
 14. As the operator, I want records without comments preserved in a separate aggregate, so that they remain auditable without being assigned to a strategy.
 15. As the operator, I want malformed records preserved as rejections with reasons, so that one bad row does not hide the rest of the import.
-16. As the operator, I want each cycle to consolidate its entry, pyramiding and exit orders, so that performance is measured on the logical trade.
-17. As the operator, I want individual orders retained as cycle details, so that I can audit how a cycle was executed.
+16. As the operator, I want each source position preserved as one analytical record, so that its consolidated result is not lost.
+17. As the operator, I want individual orders and transactions retained as source details, so that I can audit how a position was executed.
 18. As the operator, I want trades grouped by normalized strategy and symbol family, so that contract expirations do not split one operational series.
-19. As the operator, I want to query realized cycles through the API, so that the frontend and future tools use one contract.
+19. As the operator, I want to query position-level results through the API, so that the frontend and future tools use one contract.
 20. As the operator, I want to filter by strategy, symbol, direction, status and date range, so that I can isolate a meaningful sample.
 21. As the operator, I want table and chart filters to share one state, so that every visualization describes the same sample.
-22. As the operator, I want sortable cycle tables, so that I can rank outcomes by date, P&L and risk.
+22. As the operator, I want sortable position tables, so that I can rank outcomes by date, P&L and risk.
 23. As the operator, I want portfolio and per-strategy P&L, so that I can distinguish aggregate performance from individual edge.
 24. As the operator, I want profit factor, win rate, payoff and expectancy, so that I can evaluate return quality.
 25. As the operator, I want drawdown depth, duration and recovery time, so that I can evaluate capital risk.
@@ -55,15 +55,14 @@ Construir um dashboard local executado preferencialmente via Docker Compose, com
 - Strategy grouping supports one logical group containing base and pyramiding comment patterns.
 - A comment matching multiple groups is a configuration error and blocks completion with an explicit warning.
 - Symbols are normalized by configured prefix rules, including WIN, WDO and BIT contract families.
-- A cycle is the primary analytical unit; individual orders remain child details for auditability.
-- Open cycles are displayed but excluded from realized metrics.
+- Positions are the MVP analytical unit; cycle reconstruction is deferred until the report provides a reliable cycle relationship.
 - Records without comments are retained in a separate aggregate and excluded from per-strategy metrics.
 - Other invalid records are retained as rejected rows with a reason and excluded from metrics.
 - Runtime is Docker Compose first, with FastAPI/Uvicorn in the container and Python direct execution as a development fallback.
 - Host volumes are used for YAML configuration and SQLite data; report exports are optional.
 - Default local port is 8765 and remains configurable.
 - The API is read-oriented for queries, with a separate asynchronous refresh operation.
-- Initial API resources include cycles, orders, metrics, strategies, import history and refresh status.
+- Initial API resources include positions, orders, transactions, metrics, strategies, import history and refresh status.
 - Filters use one shared query state across tables and charts.
 - Metrics are calculated on demand. Per-trade Sharpe and Sortino are the default; daily and annualized variants are explicit alternatives.
 - The primary refresh service is the highest test seam. API integration tests and one thin browser smoke test cover external behavior around it.
@@ -71,10 +70,10 @@ Construir um dashboard local executado preferencialmente via Docker Compose, com
 ## Testing Decisions
 
 - Tests assert externally observable behavior and persisted results, not private helper calls or DOM structure.
-- Fixtures cover valid rows, contract prefixes, missing comments, malformed values and open cycles.
+- Fixtures cover valid rows, contract prefixes, missing comments, malformed values, balance adjustments and positions without an exit.
 - Grouping tests cover base-plus-pyramiding groups, unmatched comments and ambiguous matches that block refresh.
 - Reconstruction tests verify idempotence, atomic replacement, import metadata and preservation of the last valid projection after failure.
-- Cycle tests verify consolidation of entry, pyramiding and exit orders and exclusion of open cycles from realized metrics.
+- Position tests verify source-level preservation, strategy classification and position-level P&L conventions.
 - Metric tests verify P&L, profit factor, win rate, payoff, drawdown, expectancy, Sharpe and Sortino under declared conventions.
 - API tests verify filtering, shared query semantics, asynchronous refresh state, rejection of concurrent refresh and failure fallback.
 - Browser smoke tests verify page load, synchronized filter effects and visible refresh status.
@@ -87,7 +86,7 @@ Construir um dashboard local executado preferencialmente via Docker Compose, com
 - Editing YAML grouping rules from the dashboard.
 - Replacing the Excel source with a broker API.
 - Live order execution, broker connectivity or trading decisions.
-- Imputing prices for open or incomplete cycles.
+- Reconstructing multi-position cycles or pyramiding relationships in the MVP.
 - Publishing real workbooks, CSV exports or generated reports in the public repository.
 - Reproducing every legacy report layout as a dashboard requirement.
 - Advanced portfolio optimization or automatic Kelly sizing in the MVP.

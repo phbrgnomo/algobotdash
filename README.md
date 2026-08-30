@@ -1,6 +1,6 @@
 # algobotdash
 
-Dashboard local para processar o relatório padrão de histórico de trades do MetaTrader 5 e transformar operações automatizadas em análises reproduzíveis por estratégia, símbolo e ciclo operacional.
+Dashboard local para processar o relatório padrão de histórico de trades do MetaTrader 5 e transformar operações automatizadas em análises reproduzíveis por estratégia, símbolo e posição.
 
 > [!WARNING]
 > Este repositório é público. Os arquivos reais de trades, planilhas, CSVs e relatórios gerados ficam fora do Git por design. Não publique dados de corretora neste repositório.
@@ -15,7 +15,7 @@ O `algobotdash` será uma aplicação local que recebe o relatório padrão de t
 
 - lê o relatório Excel padrão do MetaTrader 5 como fonte canônica;
 - normaliza contratos futuros em famílias como `WIN`, `WDO` e `BIT`;
-- agrupa comentários de estratégia, incluindo piramidações, em ciclos completos;
+- agrupa comentários de estratégia e normaliza posições por símbolo;
 - reconstrói uma projeção SQLite de forma idempotente;
 - calcula métricas sob demanda;
 - oferece filtros, tabelas e gráficos sincronizados;
@@ -24,7 +24,7 @@ O `algobotdash` será uma aplicação local que recebe o relatório padrão de t
 ## Conceitos principais
 
 - **Fonte canônica:** arquivo Excel atualizado manualmente.
-- **Ciclo de trade:** entrada, piramidações e saída de uma operação lógica.
+- **Posição analítica:** unidade de resultado do MVP, preservada com suas ordens e transações de auditoria.
 - **Ordem:** execução individual preservada como detalhe de auditoria.
 - **Grupo de estratégia:** agrupamento configurável de comentários no YAML.
 - **Símbolo normalizado:** família operacional independente do vencimento do contrato.
@@ -38,14 +38,14 @@ Enquanto o dashboard está sendo implementado, o relatório existente pode ser g
 
 ### Importação para SQLite
 
-O primeiro slice da Issue #2 reconstrói uma projeção SQLite a partir da seção `Posições` do relatório. Copie `config.example.yaml` para `config.yaml`, ajuste o caminho da fonte e execute:
+O primeiro slice da Issue #2 reconstrói uma projeção SQLite a partir das seções `Posições`, `Ordens` e `Transações` do relatório. Copie `config.example.yaml` para `config.yaml`, ajuste o caminho da fonte e execute:
 
 ```bash
 poetry install
 poetry run python -m algobotdash --config config.yaml --database data/algobotdash.sqlite
 ```
 
-A atualização escreve uma base temporária e só a publica ao concluir. A projeção contém `imports`, `cycles`, `orders` e `rejected_rows`; comentários sem grupo ficam preservados com `strategy` nula. Uma ambiguidade de agrupamento interrompe a atualização e mantém a última projeção válida.
+A atualização escreve uma base temporária e só a publica ao concluir. A projeção contém `imports`, `positions`, `orders`, `transactions` e `rejected_rows`; comentários sem grupo ficam preservados com `strategy` nula. Uma ambiguidade de agrupamento interrompe a atualização e mantém a última projeção válida.
 
 ### Pré-requisitos
 
@@ -101,15 +101,15 @@ O dashboard terá métricas de carteira e por estratégia, com filtros compartil
 - versões diária e anualizada de Sharpe e Sortino;
 - curvas de capital por carteira e estratégia.
 
-Ciclos abertos aparecem para rastreabilidade, mas não entram nas métricas realizadas. Registros sem comentário ficam em um agregado separado.
+Posições sem comentário ficam em um agregado separado. A reconstrução de ciclos de piramidação está fora do MVP.
 
 ## Desenvolvimento
 
 O trabalho está organizado na [Issue #1](https://github.com/phbrgnomo/algobotdash/issues/1) e nos tickets dependentes:
 
-1. [Importação e reconstrução de ciclos](https://github.com/phbrgnomo/algobotdash/issues/2)
+1. [Importação e reconstrução de posições](https://github.com/phbrgnomo/algobotdash/issues/2)
 2. [Runtime Docker e configuração local](https://github.com/phbrgnomo/algobotdash/issues/3)
-3. [API de consulta e visão básica de ciclos](https://github.com/phbrgnomo/algobotdash/issues/4)
+3. [API de consulta e visão básica de posições](https://github.com/phbrgnomo/algobotdash/issues/4)
 4. [Métricas sob demanda e filtros](https://github.com/phbrgnomo/algobotdash/issues/5)
 5. [Atualização assíncrona e fallback](https://github.com/phbrgnomo/algobotdash/issues/6)
 6. [Gráficos e análise visual](https://github.com/phbrgnomo/algobotdash/issues/7)
