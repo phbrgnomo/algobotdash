@@ -75,6 +75,10 @@ class RejectedRecord:
     raw_position_id: str
 
 
+def _cell(row: tuple[Any, ...], index: int) -> Any:
+    return row[index] if index < len(row) else None
+
+
 def _number(value: Any) -> float | None:
     if value is None or value == "":
         return None
@@ -109,15 +113,15 @@ def _datetime(value: Any) -> datetime | None:
 
 
 def _section_rows(rows: list[tuple[Any, ...]], section: str, next_section: str) -> Iterable[tuple[int, tuple[Any, ...]]]:
-    start = next(i for i, row in enumerate(rows) if row and row[0] == section)
-    end = next((i for i in range(start + 1, len(rows)) if rows[i] and rows[i][0] == next_section), len(rows))
+    start = next(i for i, row in enumerate(rows) if _cell(row, 0) == section)
+    end = next((i for i in range(start + 1, len(rows)) if _cell(rows[i], 0) == next_section), len(rows))
     for index in range(start + 2, end):
         yield index + 1, rows[index]
 
 
 def _last_section_rows(rows: list[tuple[Any, ...]], section: str, end_marker: str) -> Iterable[tuple[int, tuple[Any, ...]]]:
-    start = next(i for i, row in enumerate(rows) if row and row[0] == section)
-    end = next((i for i in range(start + 1, len(rows)) if rows[i] and rows[i][0] == end_marker), len(rows))
+    start = next(i for i, row in enumerate(rows) if _cell(row, 0) == section)
+    end = next((i for i in range(start + 1, len(rows)) if _cell(rows[i], 0) == end_marker), len(rows))
     for index in range(start + 2, end):
         yield index + 1, rows[index]
 
@@ -130,7 +134,7 @@ def read_report(source: str | Path, config: ImportConfig) -> tuple[list[Position
     rows: list[tuple[Any, ...]] = [tuple(row) for row in sheet.iter_rows(values_only=True)]
     try:
         order_rows = list(_section_rows(rows, "Ordens", "Transações"))
-        comments = {str(row[1]): str(row[11] or "").strip() for _, row in order_rows if len(row) > 11 and row[1]}
+        comments = {str(_cell(row, 1)): str(_cell(row, 11) or "").strip() for _, row in order_rows if _cell(row, 1) is not None and _cell(row, 1) != ""}
         position_rows = list(_section_rows(rows, "Posições", "Ordens"))
         transaction_rows = list(_last_section_rows(rows, "Transações", "Posições Abertas"))
     except StopIteration as exc:
@@ -140,59 +144,59 @@ def read_report(source: str | Path, config: ImportConfig) -> tuple[list[Position
     position_ids: set[str] = set()
     rejected: list[RejectedRecord] = []
     for row_number, row in position_rows:
-        position_id = str(row[1] or "").strip() if len(row) > 1 else ""
-        symbol = str(row[2] or "").strip() if len(row) > 2 else ""
+        position_id = str(_cell(row, 1) or "").strip()
+        symbol = str(_cell(row, 2) or "").strip()
         if not any(value not in (None, "") for value in row):
             continue
-        entry_at = _datetime(row[0] if row else None)
-        pnl = _number(row[12] if len(row) > 12 else None)
+        entry_at = _datetime(_cell(row, 0))
+        pnl = _number(_cell(row, 12))
         if not position_id or not entry_at or not symbol or pnl is None:
             rejected.append(RejectedRecord(row_number, "campos obrigatórios inválidos", position_id))
             continue
         comment = comments.get(position_id, "")
         strategy = config.classify_strategy(comment)
-        volume_requested, volume_executed = _volume_pair(row[4] if len(row) > 4 else None)
+        volume_requested, volume_executed = _volume_pair(_cell(row, 4))
         records.append(
             PositionRecord(
                 position_id=position_id,
                 entry_at=entry_at,
-                exit_at=_datetime(row[8] if len(row) > 8 else None),
+                exit_at=_datetime(_cell(row, 8)),
                 symbol_raw=symbol,
                 symbol_family=config.normalize_symbol(symbol),
-                direction=str(row[3] or "").strip().lower(),
+                direction=str(_cell(row, 3) or "").strip().lower(),
                 volume_requested=volume_requested,
                 volume_executed=volume_executed,
-                entry_price=_number(row[5] if len(row) > 5 else None),
-                exit_price=_number(row[9] if len(row) > 9 else None),
-                commission=_number(row[10] if len(row) > 10 else None) or 0.0,
-                swap=_number(row[11] if len(row) > 11 else None) or 0.0,
+                entry_price=_number(_cell(row, 5)),
+                exit_price=_number(_cell(row, 9)),
+                commission=_number(_cell(row, 10)) or 0.0,
+                swap=_number(_cell(row, 11)) or 0.0,
                 pnl=pnl,
                 comment=comment,
                 strategy=strategy,
-                status="closed" if _datetime(row[8] if len(row) > 8 else None) else "open",
+                status="closed" if _datetime(_cell(row, 8)) else "open",
             )
         )
         position_ids.add(position_id)
 
     orders: list[OrderRecord] = []
     for row_number, row in order_rows:
-        order_id = str(row[1] or "").strip() if len(row) > 1 else ""
-        opened_at = _datetime(row[0] if row else None)
-        symbol = str(row[2] or "").strip() if len(row) > 2 else ""
+        order_id = str(_cell(row, 1) or "").strip()
+        opened_at = _datetime(_cell(row, 0))
+        symbol = str(_cell(row, 2) or "").strip()
         if not order_id or not opened_at or not symbol:
             if any(value not in (None, "") for value in row):
                 rejected.append(RejectedRecord(row_number, "campos obrigatórios inválidos em ordem", order_id))
             continue
-        requested, executed = _volume_pair(row[4] if len(row) > 4 else None)
-        comment = str(row[11] or "").strip() if len(row) > 11 else ""
+        requested, executed = _volume_pair(_cell(row, 4))
+        comment = str(_cell(row, 11) or "").strip()
         strategy = config.classify_strategy(comment)
-        orders.append(OrderRecord(order_id, opened_at, symbol, str(row[3] or "").strip().lower(), requested, executed, _number(row[5] if len(row) > 5 else None), _number(row[6] if len(row) > 6 else None), _number(row[7] if len(row) > 7 else None), _datetime(row[8] if len(row) > 8 else None), str(row[9] or "").strip().lower(), comment, order_id if order_id in position_ids else None, strategy))
+        orders.append(OrderRecord(order_id, opened_at, symbol, str(_cell(row, 3) or "").strip().lower(), requested, executed, _number(_cell(row, 5)), _number(_cell(row, 6)), _number(_cell(row, 7)), _datetime(_cell(row, 8)), str(_cell(row, 9) or "").strip().lower(), comment, order_id if order_id in position_ids else None, strategy))
 
     transactions: list[TransactionRecord] = []
     for row_number, row in transaction_rows:
-        transaction_id = str(row[1] or "").strip() if len(row) > 1 else ""
-        at = _datetime(row[0] if row else None)
-        order_id = str(row[7] or "").strip() if len(row) > 7 else ""
+        transaction_id = str(_cell(row, 1) or "").strip()
+        at = _datetime(_cell(row, 0))
+        order_id = str(_cell(row, 7) or "").strip()
         if not transaction_id and not at:
             continue
         if not transaction_id or not at:
@@ -201,7 +205,7 @@ def read_report(source: str | Path, config: ImportConfig) -> tuple[list[Position
             continue
         position_id = order_id if order_id in position_ids else None
         strategy = config.classify_strategy(comments.get(order_id, "")) if position_id else None
-        transactions.append(TransactionRecord(transaction_id, at, str(row[2] or "").strip(), str(row[4] or row[3] or "").strip().lower(), _number(row[5] if len(row) > 5 else None), _number(row[6] if len(row) > 6 else None), order_id or None, _number(row[8] if len(row) > 8 else None) or 0.0, _number(row[9] if len(row) > 9 else None) or 0.0, _number(row[10] if len(row) > 10 else None) or 0.0, _number(row[11] if len(row) > 11 else None) or 0.0, _number(row[12] if len(row) > 12 else None), str(row[13] or "").strip() if len(row) > 13 else "", position_id, strategy))
+        transactions.append(TransactionRecord(transaction_id, at, str(_cell(row, 2) or "").strip(), str(_cell(row, 4) or _cell(row, 3) or "").strip().lower(), _number(_cell(row, 5)), _number(_cell(row, 6)), order_id or None, _number(_cell(row, 8)) or 0.0, _number(_cell(row, 9)) or 0.0, _number(_cell(row, 10)) or 0.0, _number(_cell(row, 11)) or 0.0, _number(_cell(row, 12)), str(_cell(row, 13) or "").strip(), position_id, strategy))
     return records, orders, transactions, rejected, len(position_rows) + len(order_rows) + len(transaction_rows)
 
 
