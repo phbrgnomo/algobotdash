@@ -101,10 +101,12 @@ def read_import_history(path: Path) -> list[ImportHistoryRow]:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         if "imports" not in tables:
             raise ValueError(f"schema SQLite incompatível: tabela imports ausente em {path}")
-        version_row = connection.execute("SELECT version FROM schema_version").fetchone() if "schema_version" in tables else None
+        if "schema_version" not in tables:
+            raise ValueError(f"schema SQLite incompatível em {path}: tabela schema_version ausente")
+        version_row = connection.execute("SELECT version FROM schema_version").fetchone()
         version = version_row[0] if version_row else None
         columns = {row[1] for row in connection.execute("PRAGMA table_info(imports)")}
-        if version not in (None, CURRENT_SCHEMA_VERSION):
+        if version != CURRENT_SCHEMA_VERSION:
             raise ValueError(f"versão de schema SQLite não suportada: {version}")
         if "positions_created" in columns:
             return connection.execute("SELECT id, source_name, source_hash, imported_at, rows_read, positions_created, no_comment_count, rejected_count FROM imports ORDER BY id").fetchall()

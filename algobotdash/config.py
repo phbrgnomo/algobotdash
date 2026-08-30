@@ -4,7 +4,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 class ConfigurationError(ValueError):
@@ -53,9 +53,13 @@ def load_config(path: str | Path) -> ImportConfig:
 
     config_path = Path(path)
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise ConfigurationError(f"não foi possível ler {config_path}: {exc}") from exc
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigurationError("a configuração deve ser um mapa")
 
     source = raw.get("source", {}).get("path")
     if not source:
@@ -67,6 +71,8 @@ def load_config(path: str | Path) -> ImportConfig:
     symbols = raw.get("symbols", {}).get("prefixes", {})
     if not isinstance(symbols, dict):
         raise ConfigurationError("symbols.prefixes deve ser um mapa")
+    if any(str(prefix) == "" for prefix in symbols):
+        raise ConfigurationError("symbols.prefixes não pode conter prefixos vazios")
     groups_raw = raw.get("strategies", {}).get("groups", [])
     if not isinstance(groups_raw, Sequence) or isinstance(groups_raw, (str, bytes)):
         raise ConfigurationError("strategies.groups deve ser uma sequência")
@@ -82,7 +88,13 @@ def load_config(path: str | Path) -> ImportConfig:
             or not all(isinstance(pattern, str) and pattern.strip() for pattern in patterns)
         ):
             raise ConfigurationError("patterns deve ser uma sequência de strings não vazias")
-        groups.append(StrategyGroup(str(item["name"]), tuple(map(str, patterns))))
+        valid_patterns = cast(Sequence[str], patterns)
+        try:
+            for pattern in valid_patterns:
+                re.compile(pattern)
+        except re.error as exc:
+            raise ConfigurationError(f"pattern inválido no grupo {item['name']!r}: {exc}") from exc
+        groups.append(StrategyGroup(str(item["name"]), tuple(valid_patterns)))
     return ImportConfig(
         source_path=source_path,
         symbol_prefixes=tuple((str(k), str(v)) for k, v in symbols.items()),

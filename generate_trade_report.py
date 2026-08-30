@@ -1,3 +1,4 @@
+# pyright: reportOptionalOperand=false
 import html
 import json
 import math
@@ -24,7 +25,7 @@ class Trade(TypedDict):
 class Metrics(TypedDict):
     n: int
     net: float
-    pf: float
+    pf: float | None
     wr: float | None
     pay: float | None
     exp: float
@@ -71,7 +72,7 @@ def metric_number(value: object, default: float=0.0) -> float:
     return float(value) if isinstance(value, (int, float)) else default
 def m(xs: list[float]) -> Metrics:
     n=len(xs)
-    if not n:return {'n':0,'net':0.0,'pf':0.0,'wr':None,'pay':None,'exp':0.0,'dd':0.0,'sh':None,'so':None,'dur':0}
+    if not n:return {'n':0,'net':0.0,'pf':None,'wr':None,'pay':None,'exp':0.0,'dd':0.0,'sh':None,'so':None,'dur':0}
     wins=[x for x in xs if x>0]; losses=[x for x in xs if x<0];gp=sum(wins); gl=-sum(losses); avg=sum(xs)/n
     e=peak=dd=dur=cur=0
     for x in xs:
@@ -79,7 +80,7 @@ def m(xs: list[float]) -> Metrics:
         if e>=peak:peak=e;cur=0
         else:cur+=1;dur=max(dur,cur);dd=max(dd,peak-e)
     sd=math.sqrt(sum((x-avg)**2 for x in xs)/(n-1)) if n>1 else 0; down=math.sqrt(sum(min(0,x)**2 for x in xs)/n)
-    return {'n':n,'net':sum(xs),'pf':gp/gl if gl else (99 if gp else 0.0),'wr':len(wins)/n,'pay':(sum(wins)/len(wins))/(gl/len(losses)) if wins and losses else None,'exp':avg,'dd':dd,'sh':avg/sd if sd else None,'so':avg/down if down else None,'dur':dur}
+    return {'n':n,'net':sum(xs),'pf':gp/gl if gl else (99 if gp else None),'wr':len(wins)/n,'pay':(sum(wins)/len(wins))/(gl/len(losses)) if wins and losses else None,'exp':avg,'dd':dd,'sh':avg/sd if sd else None,'so':avg/down if down else None,'dur':dur}
 def bs(xs: list[float],reps: int=2000) -> Bootstrap | None:
     if len(xs)<10:return None
     rng=random.Random(SEED+len(xs)); n=len(xs); o=[m([xs[rng.randrange(n)] for _ in range(n)]) for _ in range(reps)]

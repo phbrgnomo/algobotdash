@@ -134,7 +134,7 @@ class ImportPipelineTests(unittest.TestCase):
 
 
   def test_configuration_rejects_invalid_patterns(self) -> None:
-    for patterns in ("turtle", [], [""], ["turtle", 1]):
+    for patterns in ("turtle", [], [""], ["turtle", 1], ["("]):
       with self.subTest(patterns=patterns):
         path = self.tmp_path / "config.yml"
         path.write_text(
@@ -142,8 +142,28 @@ class ImportPipelineTests(unittest.TestCase):
             f"    - name: Turtle\n      patterns: {patterns!r}\n",
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(ConfigurationError, "patterns deve ser"):
+        expected = "pattern inválido" if patterns == ["("] else "patterns deve ser"
+        with self.assertRaisesRegex(ConfigurationError, expected):
           load_config(path)
+
+
+  def test_configuration_rejects_empty_symbol_prefix(self) -> None:
+    path = self.tmp_path / "config.yml"
+    path.write_text(
+        "source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    '': Unknown\n",
+        encoding="utf-8",
+    )
+
+    with self.assertRaisesRegex(ConfigurationError, "prefixos vazios"):
+      load_config(path)
+
+
+  def test_configuration_rejects_non_mapping_root(self) -> None:
+    path = self.tmp_path / "config.yml"
+    path.write_text("- invalid\n", encoding="utf-8")
+
+    with self.assertRaisesRegex(ConfigurationError, "configuração deve ser um mapa"):
+      load_config(path)
 
 
   def test_number_rejects_non_finite_values(self) -> None:
@@ -193,6 +213,20 @@ class ImportPipelineTests(unittest.TestCase):
     connection.close()
 
     with self.assertRaisesRegex(ValueError, "versão de schema SQLite não suportada"):
+      ImportService(config(source)).refresh(database)
+
+
+  def test_refresh_rejects_unversioned_database(self) -> None:
+    tmp_path = self.tmp_path
+    source = tmp_path / "history.xlsx"
+    database = tmp_path / "trades.sqlite"
+    workbook(source)
+    connection = sqlite3.connect(database)
+    connection.execute("create table imports (positions_created integer)")
+    connection.commit()
+    connection.close()
+
+    with self.assertRaisesRegex(ValueError, "schema_version ausente"):
       ImportService(config(source)).refresh(database)
 
 

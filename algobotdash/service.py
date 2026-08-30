@@ -4,6 +4,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,11 +22,26 @@ class ImportSummary:
     rejected_count: int
     database_path: Path
 
+
+_database_locks: dict[Path, threading.Lock] = {}
+_database_locks_guard = threading.Lock()
+
+
+def _lock_for_database(path: Path) -> threading.Lock:
+    key = path.resolve()
+    with _database_locks_guard:
+        return _database_locks.setdefault(key, threading.Lock())
+
 class ImportService:
     def __init__(self, config: ImportConfig):
         self.config = config
 
     def refresh(self, database_path: str | Path) -> ImportSummary:
+        database = Path(database_path)
+        with _lock_for_database(database):
+            return self._refresh(database)
+
+    def _refresh(self, database: Path) -> ImportSummary:
         source = self.config.source_path
         snapshot_fd, snapshot_name = tempfile.mkstemp(prefix=f".{source.stem}.", suffix=source.suffix)
         os.close(snapshot_fd)
@@ -36,7 +52,6 @@ class ImportService:
             positions, orders, transactions, rejected, rows_read = read_report(snapshot, self.config)
         finally:
             snapshot.unlink(missing_ok=True)
-        database = Path(database_path)
         database.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary_name = tempfile.mkstemp(prefix=f".{database.name}.", suffix=".tmp", dir=database.parent)
         os.close(fd)
