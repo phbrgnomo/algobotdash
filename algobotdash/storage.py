@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, timezone
-import sqlite3
 from pathlib import Path
 
 from .parser import OrderRecord, PositionRecord, RejectedRecord, TransactionRecord
-
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -92,8 +91,10 @@ def read_import_history(path: Path) -> list[tuple]:
     connection = sqlite3.connect(path)
     try:
         return connection.execute("SELECT id, source_name, source_hash, imported_at, rows_read, positions_created, no_comment_count, rejected_count FROM imports ORDER BY id").fetchall()
-    except sqlite3.DatabaseError:
-        return []
+    except sqlite3.OperationalError as exc:
+        if "no such column: positions_created" not in str(exc):
+            raise
+        return connection.execute("SELECT id, source_name, source_hash, imported_at, rows_read, cycles_created, no_comment_count, rejected_count FROM imports ORDER BY id").fetchall()
     finally:
         connection.close()
 
