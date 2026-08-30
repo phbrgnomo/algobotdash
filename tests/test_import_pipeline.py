@@ -110,7 +110,24 @@ class ImportPipelineTests(unittest.TestCase):
     connection = sqlite3.connect(database)
     self.assertEqual(connection.execute("select count(*) from imports").fetchone()[0], 2)
     self.assertEqual(connection.execute("select positions_created, no_comment_count, rejected_count from imports where id = 7").fetchone(), (4, 2, 1))
+    self.assertEqual(connection.execute("select version from schema_version").fetchone()[0], 2)
     connection.close()
+
+
+  def test_refresh_rejects_unsupported_schema_version(self) -> None:
+    tmp_path = self.tmp_path
+    source = tmp_path / "history.xlsx"
+    database = tmp_path / "trades.sqlite"
+    workbook(source)
+    connection = sqlite3.connect(database)
+    connection.execute("create table schema_version (version integer primary key)")
+    connection.execute("insert into schema_version values (99)")
+    connection.execute("create table imports (id integer primary key)")
+    connection.commit()
+    connection.close()
+
+    with self.assertRaisesRegex(ValueError, "versão de schema SQLite não suportada"):
+      ImportService(config(source)).refresh(database)
 
 
   def test_refresh_is_idempotent_by_replacing_projection(self) -> None:

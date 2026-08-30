@@ -7,8 +7,14 @@ from pathlib import Path
 
 from .parser import OrderRecord, PositionRecord, RejectedRecord, TransactionRecord
 
+CURRENT_SCHEMA_VERSION = 2
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
+CREATE TABLE schema_version (
+  version INTEGER PRIMARY KEY
+);
+INSERT INTO schema_version(version) VALUES (2);
 CREATE TABLE imports (
   id INTEGER PRIMARY KEY,
   source_name TEXT NOT NULL,
@@ -90,11 +96,19 @@ def read_import_history(path: Path) -> list[tuple]:
         return []
     connection = sqlite3.connect(path)
     try:
-        return connection.execute("SELECT id, source_name, source_hash, imported_at, rows_read, positions_created, no_comment_count, rejected_count FROM imports ORDER BY id").fetchall()
-    except sqlite3.OperationalError as exc:
-        if "no such column: positions_created" not in str(exc):
-            raise
-        return connection.execute("SELECT id, source_name, source_hash, imported_at, rows_read, cycles_created, no_comment_count, rejected_count FROM imports ORDER BY id").fetchall()
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if "imports" not in tables:
+            raise ValueError(f"schema SQLite incompatível: tabela imports ausente em {path}")
+        version_row = connection.execute("SELECT version FROM schema_version").fetchone() if "schema_version" in tables else None
+        version = version_row[0] if version_row else None
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(imports)")}
+        if version not in (None, CURRENT_SCHEMA_VERSION):
+            raise ValueError(f"versão de schema SQLite não suportada: {version}")
+        if "positions_created" in columns:
+            return connection.execute("SELECT id, source_name, source_hash, imported_at, rows_read, positions_created, no_comment_count, rejected_count FROM imports ORDER BY id").fetchall()
+        if version is None and "cycles_created" in columns:
+            return connection.execute("SELECT id, source_name, source_hash, imported_at, rows_read, cycles_created, no_comment_count, rejected_count FROM imports ORDER BY id").fetchall()
+        raise ValueError(f"schema SQLite incompatível em {path}: coluna de contagem de posições ausente")
     finally:
         connection.close()
 
