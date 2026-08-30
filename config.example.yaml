@@ -1,0 +1,23 @@
+source:
+  path: ./ReportHistory-2002705608.xlsx
+
+symbols:
+  prefixes:
+    WIN: WIN
+    WDO: WDO
+    BIT: BIT
+
+strategies:
+  groups:
+    - name: Turtle
+      patterns: ["TurtleS2", "TurtlePyr_1", "TurtlePyr_2"]
+    - name: FVG
+      patterns: ["FVGscalp"]
+    - name: RadarWIN
+      patterns: ["radarwin"]
+    - name: RadarWDO
+      patterns: ["radarwdo"]
+    - name: Soberano
+      patterns: ["soberano"]
+    - name: EngulfPattern
+      patterns: ["engulfpattern"]

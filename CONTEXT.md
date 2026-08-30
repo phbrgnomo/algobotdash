@@ -1,6 +1,6 @@
 # Algobotdash
 
-Dashboard local para transformar relatórios de trades automatizados em análises reproduzíveis por estratégia, símbolo e ciclo operacional.
+Dashboard local para transformar relatórios de trades automatizados em análises reproduzíveis por estratégia, símbolo e posição analítica.
 
 ## Language
 
@@ -12,8 +12,58 @@ _Avoid_: banco principal, dado definitivo (para o SQLite)
 Unidade consolidada de uma operação lógica, incluindo entrada, piramidações e saída de uma estratégia.
 _Avoid_: perna, ordem isolada (quando a análise é do resultado do ciclo)
 
+Um ciclo é formado somente quando a relação entre suas execuções pode ser comprovada pelo relatório. Entradas, piramidações e saída permanecem como eventos individuais de execução dentro do ciclo.
+
+**Execução**:
+Evento efetivamente realizado no mercado, preservado com seu horário, preço, direção e volume executado.
+_Avoid_: ordem (uma ordem pode ser parcialmente executada ou rejeitada)
+
+**Volume executado**:
+Quantidade efetivamente realizada em uma execução; é preservada para auditoria e reconciliação.
+_Avoid_: volume solicitado, volume exibido sem distinguir execução
+
+**Volume solicitado**:
+Quantidade originalmente submetida em uma ordem, preservada separadamente quando o relatório também informa a quantidade executada.
+_Avoid_: volume do ciclo
+
+**Registro não associado**:
+Ordem ou execução preservada para auditoria quando não existe vínculo comprovável com uma posição.
+_Avoid_: ciclo provisório, rejeição automática
+
+Ordens rejeitadas ou canceladas permanecem como ordens preservadas, mas não produzem execução, ciclo ou métrica. Uma ordem parcialmente executada preserva a quantidade solicitada e a quantidade executada separadamente.
+
+**P&L do ciclo**:
+Resultado consolidado pela soma do P&L das execuções associadas ao ciclo, considerando os custos registrados nas próprias execuções.
+_Avoid_: lucro copiado sem reconciliação da posição
+
+**Histórico de importações**:
+Registro permanente das atualizações válidas, incluindo a identificação da fonte, seu hash, horário e indicadores de qualidade.
+_Avoid_: parte descartável da projeção
+
+**Confiança do vínculo**:
+Grau de evidência de que uma ordem ou execução pertence a um ciclo, determinado por sinais concordantes do relatório; vínculos ambíguos permanecem não associados.
+_Avoid_: escolha arbitrária, certeza inferida
+
+**Ciclo de piramidação**:
+Ciclo único composto por uma entrada-base e uma ou mais entradas adicionais da mesma operação, reconhecidas por linhagem de estratégia, ativo, direção e encerramento comum; cada posição e execução continua auditável separadamente.
+_Avoid_: soma cega de posições, ordem isolada como ciclo
+
+No MVP do algobotdash, ciclos de piramidação não são reconstruídos. A `Position` é a unidade analítica; a reconstrução de ciclos é uma evolução posterior que exigirá vínculo explícito ou regras próprias.
+
+**Agregação por estratégia**:
+Visão que soma posições classificadas pela configuração de comentários e símbolos, sem afirmar que posições relacionadas formam um ciclo único.
+_Avoid_: ciclo implícito, vínculo de saída inferido
+
+**Reconciliação global**:
+Conferência entre o P&L consolidado das posições e a soma das transações do relatório, sem usar essa conferência para inventar vínculos por estratégia.
+_Avoid_: atribuição de saída por igualdade de P&L
+
+**Posição analítica**:
+Unidade de análise do MVP, identificada pelo registro de posição; sem um campo explícito de vínculo, não é classificada pela ordem correspondente e ciclos de piramidação não são inferidos nesta versão.
+_Avoid_: ciclo implícito, agrupamento por proximidade
+
 **Ordem**:
-Registro individual de execução associado a um ciclo, preservado como detalhe de rastreabilidade.
+Registro individual de intenção/estado do relatório, preservado como detalhe de rastreabilidade da posição quando houver vínculo explícito.
 _Avoid_: trade completo
 
 **Estratégia**:
@@ -41,11 +91,11 @@ Processo explícito que lê a fonte canônica, reconstrói a projeção SQLite e
 _Avoid_: sincronização silenciosa
 
 **Métrica**:
-Resultado calculado sobre os ciclos normalizados e recalculado conforme o filtro solicitado.
+Resultado calculado sobre as posições analíticas normalizadas e recalculado conforme o filtro solicitado.
 _Avoid_: valor pré-calculado permanente
 
-**Ciclo aberto**:
-Ciclo que possui entrada sem saída correspondente no relatório; permanece rastreável, mas não entra nas métricas realizadas até ser encerrado.
+**Posição aberta**:
+Posição que possui entrada sem saída correspondente no relatório; permanece rastreável, mas não entra nas métricas realizadas além do P&L explicitamente informado pela fonte.
 _Avoid_: trade perdido
 
 **Sem comentário**:
@@ -53,11 +103,11 @@ Registro preservado em um agregado separado para rastreabilidade, mas excluído 
 _Avoid_: sem estratégia
 
 **Métrica por trade**:
-Métrica calculada tratando cada ciclo realizado como uma observação, sem anualização implícita.
+Métrica calculada tratando cada posição realizada como uma observação, sem anualização implícita.
 _Avoid_: métrica diária
 
 **Importação**:
-Execução identificada por hash da fonte, horário, contagens de linhas, ciclos, registros sem comentário e rejeições.
+Execução identificada por hash da fonte, horário, contagens de linhas, posições, registros sem comentário e rejeições.
 _Avoid_: carga sem rastreio
 
 **Ambiguidade de agrupamento**:
@@ -65,7 +115,7 @@ Comentário que corresponde a mais de uma regra configurada; é erro de configur
 _Avoid_: escolha por prioridade implícita
 
 **Importação válida**:
-Execução que conclui a reconstrução sem ambiguidades de agrupamento e mantém disponíveis os ciclos aceitos, os registros sem comentário e as rejeições.
+Execução que conclui a reconstrução sem ambiguidades de agrupamento e mantém disponíveis as posições, os registros sem comentário e as rejeições.
 _Avoid_: atualização parcial
 
 **Execução principal**:

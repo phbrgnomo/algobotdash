@@ -28,3 +28,8 @@ env/
 
 # Generated reports
 reports/
+data/
+
+# Local Configs
+config.yaml
+.vscode/
