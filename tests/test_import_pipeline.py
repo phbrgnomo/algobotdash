@@ -8,7 +8,12 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from algobotdash.config import ConfigurationError, ImportConfig, StrategyGroup, load_config
+from algobotdash.config import (
+    ConfigurationError,
+    ImportConfig,
+    StrategyGroup,
+    load_config,
+)
 from algobotdash.parser import _number
 from algobotdash.service import ImportService
 
@@ -71,6 +76,15 @@ def truncate_positions_header(path: Path) -> None:
             book.save(path)
             return
     raise AssertionError("section not found: Posições")
+
+
+def append_rejected_transaction(path: Path) -> None:
+    book = load_workbook(path)
+    sheet = book.active
+    if sheet is None:
+        raise RuntimeError("workbook fixture has no active worksheet")
+    sheet.append(("2026.08.01 13:00:00", None, "WINQ26", "sell", "out", 1, 130100, 1001, 0, 0, 0, 0, 10105, "invalid transaction"))
+    book.save(path)
 
 
 class ImportPipelineTests(unittest.TestCase):
@@ -211,6 +225,8 @@ class ImportPipelineTests(unittest.TestCase):
             self.assertEqual(connection.execute("select count(*) from positions").fetchone()[0], 2)
             self.assertEqual(connection.execute("select count(*) from orders").fetchone()[0], 2)
             self.assertEqual(connection.execute("select count(*) from transactions").fetchone()[0], 3)
+            self.assertEqual(connection.execute("select count(*) from rejected_rows").fetchone()[0], 0)
+            self.assertEqual(connection.execute("select strategy from orders where order_id = '1001'").fetchone()[0], "Turtle")
             self.assertEqual(connection.execute("select strategy from transactions where transaction_id = '101'").fetchone()[0], "Turtle")
             connection.close()
 
@@ -220,6 +236,7 @@ class ImportPipelineTests(unittest.TestCase):
     source = tmp_path / "history.xlsx"
     database = tmp_path / "trades.sqlite"
     workbook(source)
+    append_rejected_transaction(source)
     service = ImportService(config(source))
 
     first = service.refresh(database)
@@ -231,7 +248,8 @@ class ImportPipelineTests(unittest.TestCase):
     self.assertEqual(connection.execute("select count(*) from positions").fetchone()[0], 2)
     self.assertEqual(connection.execute("select count(*) from orders").fetchone()[0], 2)
     self.assertEqual(connection.execute("select count(*) from transactions").fetchone()[0], 3)
-    self.assertEqual(connection.execute("select count(*) from rejected_rows").fetchone()[0], 0)
+    self.assertEqual(connection.execute("select count(*) from rejected_rows").fetchone()[0], 1)
+    self.assertEqual(connection.execute("select reason from rejected_rows").fetchone()[0], "campos obrigatórios inválidos em transação")
     self.assertEqual(connection.execute("select strategy from orders where order_id = '1001'").fetchone()[0], "Turtle")
     self.assertEqual(connection.execute("select strategy from transactions where transaction_id = '101'").fetchone()[0], "Turtle")
     connection.close()
