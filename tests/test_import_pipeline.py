@@ -24,7 +24,6 @@ def config(source: Path) -> ImportConfig:
 
 
 def workbook(path: Path, *, ambiguous: bool = False) -> None:
-
     book = Workbook()
     sheet = book.active
     if sheet is None:
@@ -78,25 +77,26 @@ class ImportPipelineTests(unittest.TestCase):
 
 
   def test_new_source_preserves_import_history(self) -> None:
-      tmp_path = self.tmp_path
-      source = tmp_path / "history.xlsx"
-      changed_source = tmp_path / "history-changed.xlsx"
-      database = tmp_path / "trades.sqlite"
-      workbook(source)
-      workbook(changed_source)
-      changed_book = load_workbook(changed_source)
-      changed_sheet = changed_book.active
-      if changed_sheet is None:
-          raise RuntimeError("workbook fixture has no active worksheet")
-      changed_sheet["M3"] = 101
-      changed_book.save(changed_source)
+    tmp_path = self.tmp_path
+    source = tmp_path / "history.xlsx"
+    changed_source = tmp_path / "history-changed.xlsx"
+    database = tmp_path / "trades.sqlite"
+    workbook(source)
+    workbook(changed_source)
+    changed_book = load_workbook(changed_source)
+    changed_sheet = changed_book.active
+    if changed_sheet is None:
+        raise RuntimeError("workbook fixture has no active worksheet")
+    changed_sheet["M3"] = 101
+    changed_book.save(changed_source)
 
-      ImportService(config(source)).refresh(database)
-      ImportService(config(changed_source)).refresh(database)
+    ImportService(config(source)).refresh(database)
+    ImportService(config(changed_source)).refresh(database)
 
-      self._extracted_from_test_refresh_is_idempotent_by_replacing_projection_15(
-          database, 2
-      )
+    connection = sqlite3.connect(database)
+    self.assertEqual(connection.execute("select count(*) from imports").fetchone()[0], 2)
+    self.assertEqual(connection.execute("select count(*) from positions").fetchone()[0], 2)
+    connection.close()
 
 
   def test_refresh_rejects_unsupported_schema_version(self) -> None:
@@ -116,32 +116,22 @@ class ImportPipelineTests(unittest.TestCase):
 
 
   def test_refresh_is_idempotent_by_replacing_projection(self) -> None:
-      tmp_path = self.tmp_path
-      source = tmp_path / "history.xlsx"
-      database = tmp_path / "trades.sqlite"
-      workbook(source)
-      service = ImportService(config(source))
+    tmp_path = self.tmp_path
+    source = tmp_path / "history.xlsx"
+    database = tmp_path / "trades.sqlite"
+    workbook(source)
+    service = ImportService(config(source))
 
-      first = service.refresh(database)
-      second = service.refresh(database)
+    first = service.refresh(database)
+    second = service.refresh(database)
 
-      self.assertEqual(first.source_hash, second.source_hash)
-      self._extracted_from_test_refresh_is_idempotent_by_replacing_projection_15(
-          database, 1
-      )
+    self.assertEqual(first.source_hash, second.source_hash)
+    connection = sqlite3.connect(database)
+    self.assertEqual(connection.execute("select count(*) from imports").fetchone()[0], 1)
+    self.assertEqual(connection.execute("select count(*) from positions").fetchone()[0], 2)
+    connection.close()
 
 
-  def _extracted_from_test_refresh_is_idempotent_by_replacing_projection_15(self, database, arg1):
-      connection = sqlite3.connect(database)
-      self.assertEqual(
-          connection.execute("select count(*) from imports").fetchone()[0], arg1
-      )
-      self.assertEqual(
-          connection.execute("select count(*) from positions").fetchone()[0], 2
-      )
-      connection.close()
-
-  # TODO Rename this here and in `test_new_source_preserves_import_history`, `test_refresh_rejects_unsupported_schema_version`, `test_refresh_is_idempotent_by_replacing_projection` and `test_ambiguous_comment_aborts_without_publishing_or_mutating_existing_projection`
   def test_ambiguous_comment_aborts_without_publishing_or_mutating_existing_projection(self) -> None:
     tmp_path = self.tmp_path
     source = tmp_path / "history.xlsx"
