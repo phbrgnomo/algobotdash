@@ -32,3 +32,4 @@ data/
 
 # Local Configs
 config.yaml
+.vscode/
