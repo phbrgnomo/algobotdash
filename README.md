@@ -73,10 +73,40 @@ Volumes locais planejados:
 | Diretório | Finalidade |
 |---|---|
 | `config/` | YAML com caminho da fonte, regras de símbolos e grupos de estratégia |
+| `source/` | Workbook Excel montado somente para leitura |
 | `data/` | SQLite e estado derivado |
 | `reports/` | Exportações locais opcionais |
 
 A configuração YAML será a fonte canônica dos agrupamentos. O dashboard não editará o YAML no MVP.
+
+### Runtime Docker
+
+O Compose cria os diretórios locais `config/`, `source/`, `data/` e `reports/` quando necessário. Prepare a configuração e a fonte com:
+
+```bash
+cp config.example.yaml config/config.yaml
+cp /caminho/para/ReportHistory.xlsx source/ReportHistory.xlsx
+docker compose up -d
+```
+
+Abra `http://localhost:8765/`. A porta do host pode ser alterada com `ALGOBOTDASH_PORT`, por exemplo `ALGOBOTDASH_PORT=9000 docker compose up -d`.
+
+O serviço não importa o workbook automaticamente. Para criar ou reconstruir a projeção no volume `data/`, execute:
+
+```bash
+docker compose run --rm algobotdash \
+  python -m algobotdash \
+  --config /app/config/config.yaml \
+  --database /app/data/algobotdash.sqlite
+```
+
+A execução direta via Poetry é o fallback de desenvolvimento:
+
+```bash
+poetry run uvicorn algobotdash.web:app --host 127.0.0.1 --port 8765
+```
+
+O dashboard inicial é uma página própria de estado operacional. Ele não serve nem reutiliza o HTML legado produzido por `generate_trade_report.py`; `reports/` permanece reservado para exportações futuras.
 
 ## Fluxo de atualização planejado
 

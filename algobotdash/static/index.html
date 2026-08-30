@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>algobotdash</title>
+    <style>
+      :root { color-scheme: dark; font: 16px system-ui, sans-serif; }
+      body { background: #101418; color: #e7edf2; margin: 0; }
+      main { margin: 8vh auto; max-width: 720px; padding: 0 24px; }
+      section { background: #192127; border: 1px solid #34414a; border-radius: 8px; padding: 20px; }
+      dl { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      dt { color: #9eabb4; } dd { margin: 0; }
+      .ok { color: #59d69b; } .warn { color: #f5c15d; } .error { color: #ff7b86; }
+      #error { margin-top: 20px; color: #ffb4ba; }
+      small { color: #9eabb4; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>algobotdash</h1>
+      <p>Dashboard local de análise reproduzível de trades.</p>
+      <section aria-live="polite">
+        <dl>
+          <dt>Serviço</dt><dd id="service">consultando...</dd>
+          <dt>Configuração</dt><dd id="configuration">consultando...</dd>
+          <dt>Fonte Excel</dt><dd id="source">consultando...</dd>
+          <dt>Projeção SQLite</dt><dd id="projection">consultando...</dd>
+          <dt>Última importação</dt><dd id="last-imported-at">—</dd>
+        </dl>
+        <p id="error" hidden></p>
+        <small id="updated-at">Ainda não atualizado.</small>
+      </section>
+    </main>
+    <script>
+      const fields = ["configuration", "source", "projection"];
+      let lastState = null;
+
+      function label(value) {
+        return {valid: "válida", invalid: "inválida", available: "disponível",
+          missing: "ausente", unavailable: "indisponível", unknown: "desconhecida"}[value] || value;
+      }
+
+      function render(data) {
+        lastState = data;
+        document.querySelector("#service").textContent = data.status === "ok" ? "online" : data.status;
+        document.querySelector("#service").className = data.status === "ok" ? "ok" : "error";
+        fields.forEach((field) => {
+          const element = document.querySelector(`#${field}`);
+          element.textContent = label(data[field]);
+          element.className = ["valid", "available", "ok"].includes(data[field]) ? "ok" : "warn";
+        });
+        document.querySelector("#last-imported-at").textContent = data.last_imported_at || "—";
+        const error = document.querySelector("#error");
+        error.hidden = !data.error;
+        error.textContent = data.error ? `Atenção: ${data.error}` : "";
+        document.querySelector("#updated-at").textContent = `Atualizado em ${new Date().toLocaleTimeString()}`;
+      }
+
+      async function refresh() {
+        try {
+          const response = await fetch("/health", {cache: "no-store"});
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          render(await response.json());
+        } catch (error) {
+          const notice = document.querySelector("#error");
+          notice.hidden = false;
+          notice.textContent = `Atenção: não foi possível atualizar o estado (${error.message}).`;
+          if (lastState) document.querySelector("#updated-at").textContent += " — mantendo o último estado válido";
+        }
+      }
+      refresh();
+      setInterval(refresh, 5000);
+    </script>
+  </body>
+</html>
