@@ -12,7 +12,9 @@ from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
 
-SRC=Path('source/ReportHistory-2002705608.xlsx'); OUT=Path('reports'); OUT.mkdir(exist_ok=True)
+SRC=Path('source/ReportHistory-2002705608.xlsx')
+OUT=Path('reports')
+OUT.mkdir(exist_ok=True)
 REPORT_TZ=ZoneInfo('America/Bahia'); START=datetime(2026,4,1,tzinfo=REPORT_TZ); SEED=20260829
 COLORS={'BIT FVG':'#f59e0b','BIT Turtle':'#8b5cf6','WDO FVG':'#06b6d4','WDO RadarWDO':'#ef4444','WDO Turtle':'#22c55e','WIN EngulfPattern':'#f97316','WIN FVG':'#3b82f6','WIN RadarWIN':'#e11d48','WIN Soberano':'#a855f7','WIN Turtle':'#14b8a6'}
 class Trade(TypedDict):

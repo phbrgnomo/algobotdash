@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
-from .config import load_config
+from .config import ConfigurationError, load_config
 from .storage import read_import_history
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ def _health_state() -> dict[str, Any]:
 
     try:
         config = load_config(CONFIG_PATH)
-    except Exception as exc:
+    except ConfigurationError as exc:
         result["error"] = _error_message(exc)
         logger.warning("configuração indisponível: %s", exc, exc_info=logger.isEnabledFor(logging.DEBUG))
     else:
