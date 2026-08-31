@@ -15,13 +15,18 @@ RUN poetry install --only main
 FROM python:3.12-slim AS runtime
 
 WORKDIR /app
+ARG APP_UID=10001
+ARG APP_GID=10001
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+RUN groupadd --gid "${APP_GID}" algobotdash \
+ && useradd --uid "${APP_UID}" --gid algobotdash --create-home algobotdash
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/algobotdash /app/algobotdash
 COPY --from=builder /app/generate_trade_report.py /app/README.md /app/
 
+USER algobotdash
 EXPOSE 8765
 CMD ["uvicorn", "algobotdash.web:app", "--host", "0.0.0.0", "--port", "8765"]

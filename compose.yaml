@@ -5,6 +5,7 @@ services:
     environment:
       ALGOBOTDASH_CONFIG: /app/config/config.yaml
       ALGOBOTDASH_DATABASE: /app/data/algobotdash.sqlite
+    user: "${ALGOBOTDASH_UID:-10001}:${ALGOBOTDASH_GID:-10001}"
     ports:
       - "127.0.0.1:${ALGOBOTDASH_PORT:-8765}:8765"
     volumes:

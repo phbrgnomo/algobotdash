@@ -101,6 +101,25 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["status"], "error")
 
+    def test_fastapi_health_returns_controlled_error_for_non_utf8_config(self) -> None:
+        """Health should diagnose a configuration that cannot be decoded."""
+
+        async def request_health() -> httpx.Response:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                return await client.get("/health")
+
+        (self.config_dir / "config.yaml").write_bytes(b"\xff")
+        with self._paths():
+            response = asyncio.run(request_health())
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["configuration"], "invalid")
+        self.assertEqual(payload["status"], "error")
+
     def test_health_distinguishes_missing_configuration_source_and_projection(self) -> None:
         """Health should distinguish an absent configuration from other states."""
         payload = self._health_payload()

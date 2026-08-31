@@ -61,7 +61,11 @@ def _health_state() -> dict[str, Any]:
             result["projection"] = "available"
             if history:
                 result["last_imported_at"] = history[-1][3]
-    if result["configuration"] != "valid" or result["source"] == "missing" or result["projection"] == "invalid":
+    if (
+        result["configuration"] != "valid"
+        or result["source"] == "missing"
+        or result["projection"] == "invalid"
+    ):
         result["status"] = "error"
     return result
 

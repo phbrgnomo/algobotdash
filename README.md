@@ -81,12 +81,14 @@ A configuração YAML será a fonte canônica dos agrupamentos. O dashboard não
 
 ### Runtime Docker
 
-O Compose cria os diretórios locais `config/`, `source/`, `data/` e `reports/` quando necessário. Prepare a configuração e a fonte com:
+O container roda sem privilégios de root. Prepare os diretórios, a configuração, a fonte e o mapeamento para o usuário do host com:
 
 ```bash
-mkdir -p config source
+mkdir -p config source data reports
 cp config.example.yaml config/config.yaml
 cp /caminho/para/ReportHistory.xlsx source/ReportHistory.xlsx
+export ALGOBOTDASH_UID="$(id -u)"
+export ALGOBOTDASH_GID="$(id -g)"
 docker compose up -d
 ```
 
@@ -109,7 +111,7 @@ ALGOBOTDASH_DATABASE=data/algobotdash.sqlite \
 poetry run uvicorn algobotdash.web:app --host 127.0.0.1 --port 8765
 ```
 
-`ALGOBOTDASH_CONFIG` e `ALGOBOTDASH_DATABASE` também podem ser usados para apontar o serviço a outros arquivos locais. No Compose, eles são definidos automaticamente para os caminhos montados em `/app`.
+`ALGOBOTDASH_CONFIG` e `ALGOBOTDASH_DATABASE` também podem ser usados para apontar o serviço a outros arquivos locais. No Compose, eles são definidos automaticamente para os caminhos montados em `/app`. `ALGOBOTDASH_UID` e `ALGOBOTDASH_GID` fazem o processo no container gravar `data/` e `reports/` como o usuário do host; deixe ambos definidos para evitar arquivos inacessíveis depois da importação.
 
 O dashboard inicial é uma página própria de estado operacional. Ele não serve nem reutiliza o HTML legado produzido por `generate_trade_report.py`; `reports/` permanece reservado para exportações futuras.
 

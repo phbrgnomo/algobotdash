@@ -86,6 +86,8 @@ class DockerRuntimeTests(unittest.TestCase):
             **os.environ,
             "COMPOSE_PROJECT_NAME": f"algobotdash_test_{self.tmp_path.name.replace('-', '_')}",
             "ALGOBOTDASH_PORT": "18765",
+            "ALGOBOTDASH_UID": str(os.getuid()),
+            "ALGOBOTDASH_GID": str(os.getgid()),
         }
 
     def tearDown(self) -> None:
@@ -159,6 +161,8 @@ class DockerRuntimeTests(unittest.TestCase):
         self.assertEqual(imported.returncode, 0, imported.stderr)
         database_path = self.tmp_path / "data" / "algobotdash.sqlite"
         self.assertTrue(database_path.is_file())
+        self.assertEqual(database_path.stat().st_uid, os.getuid())
+        self.assertEqual(database_path.stat().st_gid, os.getgid())
         inspected = self._compose(
             "run",
             "--rm",

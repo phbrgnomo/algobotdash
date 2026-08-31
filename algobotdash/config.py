@@ -64,7 +64,7 @@ def load_config(path: str | Path) -> ImportConfig:
     config_path = Path(path)
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConfigurationError(f"não foi possível ler {config_path}: {exc}") from exc
     except yaml.YAMLError as exc:
         raise ConfigurationError(f"não foi possível interpretar {config_path}: {exc}") from exc
