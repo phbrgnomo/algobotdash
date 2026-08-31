@@ -7,7 +7,9 @@ from pathlib import Path
 from openpyxl import Workbook
 
 
-def workbook(path: Path, *, ambiguous: bool = False) -> None:
+def workbook(
+    path: Path, *, ambiguous: bool = False, legacy_report: bool = False
+) -> None:
     """Create a representative workbook fixture at ``path``."""
     book = Workbook()
     sheet = book.active
@@ -22,7 +24,8 @@ def workbook(path: Path, *, ambiguous: bool = False) -> None:
     )
     sheet.append(
         (
-            "2026.08.01 10:00:00", 1, "WINQ26", "buy", "2 / 3", 130000,
+            "2026.08.01 10:00:00", 1001 if legacy_report else 1, "WINQ26",
+            "buy", "2 / 3", 130000,
             None, None, "2026.08.01 11:00:00", 130100, -2, 0, 100,
         )
     )
@@ -40,7 +43,7 @@ def workbook(path: Path, *, ambiguous: bool = False) -> None:
             "S / L", "T / P", "Horário", "Estado", None, "Comentário",
         )
     )
-    comment = "turtle fvg" if ambiguous else "TurtleS2"
+    comment = "FVGscalp" if legacy_report else "turtle fvg" if ambiguous else "TurtleS2"
     sheet.append(
         (
             "2026.08.01 09:59:00", 1001, "WINQ26", "buy limit", "2 / 2",

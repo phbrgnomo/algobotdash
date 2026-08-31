@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -51,6 +52,11 @@ class WebTests(unittest.TestCase):
             f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
             encoding="utf-8",
         )
+
+    def _health_payload(self) -> dict[str, Any]:
+        """Read health state using the isolated test paths."""
+        with self._paths():
+            return health()
 
     def test_dashboard_serves_own_static_page(self) -> None:
         """Dashboard should serve its own static HTML page."""
@@ -97,8 +103,7 @@ class WebTests(unittest.TestCase):
 
     def test_health_distinguishes_missing_configuration_source_and_projection(self) -> None:
         """Health should distinguish an absent configuration from other states."""
-        with self._paths():
-            payload = health()
+        payload = self._health_payload()
 
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["version"], "0.1.0")
@@ -112,8 +117,7 @@ class WebTests(unittest.TestCase):
         self._write_config()
         (self.source_dir / "ReportHistory.xlsx").write_bytes(b"fixture")
 
-        with self._paths():
-            payload = health()
+        payload = self._health_payload()
 
         self.assertEqual(payload["configuration"], "valid")
         self.assertEqual(payload["source"], "available")
@@ -123,8 +127,7 @@ class WebTests(unittest.TestCase):
         """Health should report a valid configuration and missing source."""
         self._write_config()
 
-        with self._paths():
-            payload = health()
+        payload = self._health_payload()
 
         self.assertEqual(payload["configuration"], "valid")
         self.assertEqual(payload["source"], "missing")
@@ -136,8 +139,7 @@ class WebTests(unittest.TestCase):
         database_path = self.data_dir / "algobotdash.sqlite"
         database_path.write_bytes(b"projection")
 
-        with self._paths():
-            payload = health()
+        payload = self._health_payload()
 
         self.assertEqual(payload["projection"], "invalid")
         self.assertEqual(payload["status"], "error")
@@ -155,8 +157,7 @@ class WebTests(unittest.TestCase):
         connection.commit()
         connection.close()
 
-        with self._paths():
-            payload = health()
+        payload = self._health_payload()
 
         self.assertEqual(payload["projection"], "available")
         self.assertEqual(payload["last_imported_at"], "2026-08-31T10:00:00+00:00")

@@ -7,9 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from openpyxl import Workbook
-
 import generate_trade_report as report
+from tests.fixture_helpers import workbook
 
 
 class LegacyReportTests(unittest.TestCase):
@@ -44,7 +43,7 @@ class LegacyReportTests(unittest.TestCase):
             source = directory / "ReportHistory.xlsx"
             config_path = directory / "config.yaml"
             output = directory / "reports"
-            self._write_workbook(source)
+            workbook(source, legacy_report=True)
             config_path.write_text(
                 f"source:\n  path: {source}\n",
                 encoding="utf-8",
@@ -55,55 +54,9 @@ class LegacyReportTests(unittest.TestCase):
             ):
                 report.main()
 
-            generated = output / "avaliacao_estrategias_2026-08-28.html"
+            generated = output / "avaliacao_estrategias_2026-08-01.html"
             self.assertTrue(generated.is_file())
             self.assertIn(
                 "Avaliação Quantitativa de Estratégias",
                 generated.read_text(encoding="utf-8"),
             )
-
-    @staticmethod
-    def _write_workbook(path: Path) -> None:
-        """Write the smallest valid workbook accepted by the legacy generator."""
-        book = Workbook()
-        sheet = book.active
-        if sheet is None:
-            raise RuntimeError("workbook fixture has no active worksheet")
-        sheet.append(("Posições",))
-        sheet.append(
-            (
-                "Horário", "Position", "Ativo", "Tipo", "Volume", "Preço",
-                "S / L", "T / P", "Horário", "Preço", "Comissão", "Swap",
-                "Lucro",
-            )
-        )
-        sheet.append(
-            (
-                "2026.08.01 10:00:00", 1001, "WINQ26", "buy", 1, 130000,
-                None, None, None, None, 0, 0, 100,
-            )
-        )
-        sheet.append((None, None, None, None))
-        sheet.append(("Ordens",))
-        sheet.append(
-            (
-                "Horário da Abertura", "Ordem", "Ativo", "Tipo", "Volume",
-                "Preço", "S / L", "T / P", "Horário", "Estado", None,
-                "Comentário",
-            )
-        )
-        sheet.append(
-            (
-                "2026.08.01 09:59:00", 1001, "WINQ26", "buy", 1, 130000,
-                None, None, None, "filled", None, "FVGscalp",
-            )
-        )
-        sheet.append(("Transações",))
-        sheet.append(
-            (
-                "Horário", "Oferta", "Ativo", "Tipo", "Direção", "Volume",
-                "Preço", "Ordem", "Comissão", "Taxa", "Swap", "Lucro",
-                "Saldo", "Comentário",
-            )
-        )
-        book.save(path)

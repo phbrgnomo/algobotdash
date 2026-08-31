@@ -161,6 +161,13 @@ def _position_values(position: PositionRecord, import_id: int) -> tuple[object, 
     )
 
 
+def _require_import_id(value: object) -> int:
+    """Return a valid SQLite import identifier or fail loudly."""
+    if not isinstance(value, int):
+        raise TypeError(f"identificador de importação inválido: {value!r}")
+    return value
+
+
 def _order_values(order: OrderRecord, import_id: int) -> tuple[object, ...]:
     """Convert an order record to SQLite parameters."""
     return (
@@ -224,11 +231,10 @@ def build_projection(
         rejected = list(projection.rejected)
         connection.executemany("INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)", prior_imports)
         imported_at = datetime.now(timezone.utc).isoformat()
-        existing = connection.execute(
+        if existing := connection.execute(
             "SELECT id FROM imports WHERE source_hash = ?", (source_hash,)
-        ).fetchone()
-        if existing:
-            import_id = existing[0]
+        ).fetchone():
+            import_id = _require_import_id(existing[0])
         else:
             cursor = connection.execute(
                 "INSERT INTO imports("
@@ -244,7 +250,7 @@ def build_projection(
                     len(rejected),
                 ),
             )
-            import_id = cursor.lastrowid
+            import_id = _require_import_id(cursor.lastrowid)
         connection.executemany(
             "INSERT INTO positions("
             "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, "
