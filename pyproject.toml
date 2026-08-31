@@ -10,7 +10,8 @@ packages = [{ include = "algobotdash" }]
 python = ">=3.10,<4.0"
 openpyxl = ">=3.1,<4.0"
 pyyaml = ">=6.0,<7.0"
-fastapi = ">=0.115,<0.116"
+fastapi = ">=0.141,<0.142"
+starlette = ">=1.1.0,<2.0.0"
 uvicorn = ">=0.30,<1.0"
 
 [tool.poetry.group.dev.dependencies]
