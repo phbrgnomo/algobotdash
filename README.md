@@ -73,10 +73,47 @@ Volumes locais planejados:
 | Diretório | Finalidade |
 |---|---|
 | `config/` | YAML com caminho da fonte, regras de símbolos e grupos de estratégia |
+| `source/` | Workbook Excel montado somente para leitura |
 | `data/` | SQLite e estado derivado |
 | `reports/` | Exportações locais opcionais |
 
 A configuração YAML será a fonte canônica dos agrupamentos. O dashboard não editará o YAML no MVP.
+
+### Runtime Docker
+
+O container roda sem privilégios de root. Prepare os diretórios, a configuração, a fonte e o mapeamento para o usuário do host com:
+
+```bash
+mkdir -p config source data reports
+cp config.example.yaml config/config.yaml
+cp /caminho/para/ReportHistory.xlsx source/ReportHistory.xlsx
+export ALGOBOTDASH_UID="$(id -u)"
+export ALGOBOTDASH_GID="$(id -g)"
+docker compose up -d
+```
+
+Abra `http://localhost:8765/`. A porta do host pode ser alterada com `ALGOBOTDASH_PORT`, por exemplo `ALGOBOTDASH_PORT=9000 docker compose up -d`.
+
+O serviço não importa o workbook automaticamente. Para criar ou reconstruir a projeção no volume `data/`, execute:
+
+```bash
+docker compose run --rm algobotdash \
+  python -m algobotdash \
+  --config /app/config/config.yaml \
+  --database /app/data/algobotdash.sqlite
+```
+
+A execução direta via Poetry é o fallback de desenvolvimento:
+
+```bash
+ALGOBOTDASH_CONFIG=config/config.yaml \
+ALGOBOTDASH_DATABASE=data/algobotdash.sqlite \
+poetry run uvicorn algobotdash.web:app --host 127.0.0.1 --port 8765
+```
+
+`ALGOBOTDASH_CONFIG` e `ALGOBOTDASH_DATABASE` também podem ser usados para apontar o serviço a outros arquivos locais. No Compose, eles são definidos automaticamente para os caminhos montados em `/app`. `ALGOBOTDASH_UID` e `ALGOBOTDASH_GID` fazem o processo no container gravar `data/` e `reports/` como o usuário do host; deixe ambos definidos para evitar arquivos inacessíveis depois da importação.
+
+O dashboard inicial é uma página própria de estado operacional. Ele não serve nem reutiliza o HTML legado produzido por `generate_trade_report.py`; `reports/` permanece reservado para exportações futuras.
 
 ## Fluxo de atualização planejado
 
