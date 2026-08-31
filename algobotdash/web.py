@@ -1,3 +1,5 @@
+"""HTTP endpoints for the local dashboard and health diagnostics."""
+
 from __future__ import annotations
 
 import logging
@@ -7,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import ConfigurationError, load_config
 from .storage import read_import_history
@@ -39,7 +41,11 @@ def _health_state() -> dict[str, Any]:
         config = load_config(CONFIG_PATH)
     except ConfigurationError as exc:
         result["error"] = _error_message(exc)
-        logger.warning("configuração indisponível: %s", exc, exc_info=logger.isEnabledFor(logging.DEBUG))
+        logger.warning(
+            "configuração indisponível: %s",
+            exc,
+            exc_info=logger.isEnabledFor(logging.DEBUG),
+        )
     else:
         result["configuration"] = "valid"
         result["source"] = "available" if config.source_path.is_file() else "missing"
@@ -55,14 +61,34 @@ def _health_state() -> dict[str, Any]:
             result["projection"] = "available"
             if history:
                 result["last_imported_at"] = history[-1][3]
+    if result["configuration"] != "valid" or result["source"] == "missing":
+        result["status"] = "error"
+    elif result["projection"] == "invalid":
+        result["status"] = "error"
     return result
 
 
-@app.get("/health")
 def health() -> dict[str, Any]:
+    """Return the current configuration, source, and projection state."""
     return _health_state()
 
 
-@app.get("/", response_class=FileResponse)
 def dashboard() -> FileResponse:
+    """Serve the dashboard's static HTML page."""
     return FileResponse(STATIC_INDEX, media_type="text/html")
+
+
+@app.get("/health", response_model=None)
+async def health_endpoint() -> dict[str, Any] | JSONResponse:
+    """Expose health diagnostics over HTTP without thread-pool dispatch."""
+    payload = health()
+    return JSONResponse(
+        content=payload,
+        status_code=200 if payload["status"] == "ok" else 503,
+    )
+
+
+@app.get("/")
+async def dashboard_endpoint() -> HTMLResponse:
+    """Expose the static dashboard page over HTTP."""
+    return HTMLResponse(STATIC_INDEX.read_text(encoding="utf-8"))

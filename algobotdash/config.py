@@ -1,3 +1,5 @@
+"""Load and validate the dashboard import configuration."""
+
 from __future__ import annotations
 
 import re
@@ -6,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+import yaml
+
 
 class ConfigurationError(ValueError):
     """Raised when grouping configuration cannot classify the source safely."""
@@ -13,26 +17,37 @@ class ConfigurationError(ValueError):
 
 @dataclass(frozen=True)
 class StrategyGroup:
+    """Named group of regular expressions used to classify strategies."""
+
     name: str
     patterns: tuple[str, ...]
 
     def matches(self, comment: str) -> bool:
+        """Return whether any configured pattern matches the comment."""
         value = comment.casefold()
         return any(re.search(pattern, value, flags=re.IGNORECASE) for pattern in self.patterns)
 
 
 @dataclass(frozen=True)
 class ImportConfig:
+    """Validated configuration used by the import service."""
+
     source_path: Path
     symbol_prefixes: tuple[tuple[str, str], ...]
     strategy_groups: tuple[StrategyGroup, ...]
 
     def normalize_symbol(self, raw_symbol: Any) -> str | None:
+        """Map a raw symbol to its configured family."""
         value = str(raw_symbol or "").strip().upper()
-        matches = [(prefix, family) for prefix, family in self.symbol_prefixes if value.startswith(prefix.upper())]
+        matches = [
+            (prefix, family)
+            for prefix, family in self.symbol_prefixes
+            if value.startswith(prefix.upper())
+        ]
         return max(matches, key=lambda item: len(item[0]))[1] if matches else None
 
     def classify_strategy(self, comment: Any) -> str | None:
+        """Map a comment to one configured strategy group."""
         value = str(comment or "").strip()
         if not value:
             return None
@@ -46,11 +61,6 @@ class ImportConfig:
 
 def load_config(path: str | Path) -> ImportConfig:
     """Load the local YAML contract without allowing dashboard writes."""
-    try:
-        import yaml
-    except ImportError as exc:  # pragma: no cover - depends on environment
-        raise ConfigurationError("PyYAML é necessário para ler a configuração") from exc
-
     config_path = Path(path)
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -62,7 +72,15 @@ def load_config(path: str | Path) -> ImportConfig:
         raw = {}
     if not isinstance(raw, dict):
         raise ConfigurationError("a configuração deve ser um mapa")
+    return ImportConfig(
+        source_path=_source_path(raw, config_path),
+        symbol_prefixes=_symbol_prefixes(raw),
+        strategy_groups=_strategy_groups(raw),
+    )
 
+
+def _source_path(raw: dict[Any, Any], config_path: Path) -> Path:
+    """Read and resolve the configured workbook path."""
     source_section = raw.get("source", {})
     if not isinstance(source_section, Mapping):
         raise ConfigurationError("source deve ser um mapa")
@@ -72,7 +90,11 @@ def load_config(path: str | Path) -> ImportConfig:
     source_path = Path(source.strip())
     if not source_path.is_absolute():
         source_path = config_path.parent / source_path
+    return source_path
 
+
+def _symbol_prefixes(raw: dict[Any, Any]) -> tuple[tuple[str, str], ...]:
+    """Read the configured symbol-family prefixes."""
     symbols_section = raw.get("symbols", {})
     if not isinstance(symbols_section, Mapping):
         raise ConfigurationError("symbols deve ser um mapa")
@@ -81,6 +103,11 @@ def load_config(path: str | Path) -> ImportConfig:
         raise ConfigurationError("symbols.prefixes deve ser um mapa")
     if any(not str(prefix) for prefix in symbols):
         raise ConfigurationError("symbols.prefixes não pode conter prefixos vazios")
+    return tuple((str(k), str(v)) for k, v in symbols.items())
+
+
+def _strategy_groups(raw: dict[Any, Any]) -> tuple[StrategyGroup, ...]:
+    """Read and validate the configured strategy groups."""
     strategies_section = raw.get("strategies", {})
     if not isinstance(strategies_section, Mapping):
         raise ConfigurationError("strategies deve ser um mapa")
@@ -106,8 +133,4 @@ def load_config(path: str | Path) -> ImportConfig:
         except re.error as exc:
             raise ConfigurationError(f"pattern inválido no grupo {item['name']!r}: {exc}") from exc
         groups.append(StrategyGroup(str(item["name"]), tuple(valid_patterns)))
-    return ImportConfig(
-        source_path=source_path,
-        symbol_prefixes=tuple((str(k), str(v)) for k, v in symbols.items()),
-        strategy_groups=tuple(groups),
-    )
+    return tuple(groups)
