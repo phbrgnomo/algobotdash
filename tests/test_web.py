@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import os
+import sqlite3
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from algobotdash.web import dashboard, health
+from fastapi.testclient import TestClient
+
+from algobotdash.storage import SCHEMA
+from algobotdash.web import app, dashboard, health
 
 
 class WebTests(unittest.TestCase):
@@ -43,6 +48,18 @@ class WebTests(unittest.TestCase):
         self.assertIn("Dashboard local", page)
         self.assertNotIn("generate_trade_report", page)
 
+    @unittest.skipUnless(
+        os.getenv("ALGOBOTDASH_RUN_FRAMEWORK_CLIENT_TEST") == "1",
+        "TestClient trava neste ambiente; execute com ALGOBOTDASH_RUN_FRAMEWORK_CLIENT_TEST=1",
+    )
+    def test_fastapi_serves_dashboard_over_http(self) -> None:
+        with TestClient(app) as client:
+            response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "text/html; charset=utf-8")
+        self.assertIn("Dashboard local", response.text)
+
     def test_health_distinguishes_missing_configuration_source_and_projection(self) -> None:
         with self._paths():
             payload = health()
@@ -69,7 +86,20 @@ class WebTests(unittest.TestCase):
         self.assertEqual(payload["source"], "available")
         self.assertEqual(payload["projection"], "unavailable")
 
-    def test_health_reports_projection_when_database_exists(self) -> None:
+    def test_health_reports_valid_configuration_with_missing_source(self) -> None:
+        config_path = self.config_dir / "config.yaml"
+        config_path.write_text(
+            f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
+            encoding="utf-8",
+        )
+
+        with self._paths():
+            payload = health()
+
+        self.assertEqual(payload["configuration"], "valid")
+        self.assertEqual(payload["source"], "missing")
+
+    def test_health_reports_invalid_projection_when_database_is_unreadable(self) -> None:
         config_path = self.config_dir / "config.yaml"
         config_path.write_text(
             f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
@@ -81,4 +111,26 @@ class WebTests(unittest.TestCase):
         with self._paths():
             payload = health()
 
+        self.assertEqual(payload["projection"], "invalid")
+
+    def test_health_reports_valid_projection_and_last_import(self) -> None:
+        config_path = self.config_dir / "config.yaml"
+        config_path.write_text(
+            f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
+            encoding="utf-8",
+        )
+        database_path = self.data_dir / "algobotdash.sqlite"
+        connection = sqlite3.connect(database_path)
+        connection.executescript(SCHEMA)
+        connection.execute(
+            "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, "ReportHistory.xlsx", "hash", "2026-08-31T10:00:00+00:00", 1, 1, 0, 0),
+        )
+        connection.commit()
+        connection.close()
+
+        with self._paths():
+            payload = health()
+
         self.assertEqual(payload["projection"], "available")
+        self.assertEqual(payload["last_imported_at"], "2026-08-31T10:00:00+00:00")

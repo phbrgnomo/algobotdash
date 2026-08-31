@@ -52,8 +52,9 @@
         });
         document.querySelector("#last-imported-at").textContent = data.last_imported_at || "—";
         const error = document.querySelector("#error");
-        error.hidden = !data.error;
-        error.textContent = data.error ? `Atenção: ${data.error}` : "";
+        const messages = [data.error, data.projection_error].filter(Boolean);
+        error.hidden = messages.length === 0;
+        error.textContent = messages.map((message) => `Atenção: ${message}`).join(" ");
         document.querySelector("#updated-at").textContent = `Atualizado em ${new Date().toLocaleTimeString()}`;
       }
 

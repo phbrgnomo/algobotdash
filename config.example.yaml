@@ -1,5 +1,5 @@
 source:
-  path: /app/source/ReportHistory.xlsx
+  path: ../source/ReportHistory.xlsx
 
 symbols:
   prefixes:

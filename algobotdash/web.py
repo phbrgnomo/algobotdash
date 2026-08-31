@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -14,8 +15,8 @@ from .storage import read_import_history
 logger = logging.getLogger(__name__)
 
 APP_VERSION = "0.1.0"
-CONFIG_PATH = Path("/app/config/config.yaml")
-DATABASE_PATH = Path("/app/data/algobotdash.sqlite")
+CONFIG_PATH = Path(os.getenv("ALGOBOTDASH_CONFIG", "config/config.yaml"))
+DATABASE_PATH = Path(os.getenv("ALGOBOTDASH_DATABASE", "data/algobotdash.sqlite"))
 STATIC_INDEX = Path(__file__).parent / "static" / "index.html"
 
 app = FastAPI(title="algobotdash", version=APP_VERSION)
@@ -44,12 +45,14 @@ def _health_state() -> dict[str, Any]:
         result["source"] = "available" if config.source_path.is_file() else "missing"
 
     if DATABASE_PATH.is_file():
-        result["projection"] = "available"
         try:
             history = read_import_history(DATABASE_PATH)
         except (OSError, sqlite3.Error, ValueError) as exc:
+            result["projection"] = "invalid"
+            result["projection_error"] = _error_message(exc)
             logger.warning("não foi possível ler o histórico da projeção: %s", exc)
         else:
+            result["projection"] = "available"
             if history:
                 result["last_imported_at"] = history[-1][3]
     return result

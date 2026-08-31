@@ -29,7 +29,9 @@ env/
 # Generated reports
 reports/
 data/
+source/
 
 # Local Configs
-config.yaml
+/config
+/config.yaml
 .vscode/

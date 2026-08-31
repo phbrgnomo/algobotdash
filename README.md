@@ -84,6 +84,7 @@ A configuração YAML será a fonte canônica dos agrupamentos. O dashboard não
 O Compose cria os diretórios locais `config/`, `source/`, `data/` e `reports/` quando necessário. Prepare a configuração e a fonte com:
 
 ```bash
+mkdir -p config source
 cp config.example.yaml config/config.yaml
 cp /caminho/para/ReportHistory.xlsx source/ReportHistory.xlsx
 docker compose up -d
@@ -103,8 +104,12 @@ docker compose run --rm algobotdash \
 A execução direta via Poetry é o fallback de desenvolvimento:
 
 ```bash
+ALGOBOTDASH_CONFIG=config/config.yaml \
+ALGOBOTDASH_DATABASE=data/algobotdash.sqlite \
 poetry run uvicorn algobotdash.web:app --host 127.0.0.1 --port 8765
 ```
+
+`ALGOBOTDASH_CONFIG` e `ALGOBOTDASH_DATABASE` também podem ser usados para apontar o serviço a outros arquivos locais. No Compose, eles são definidos automaticamente para os caminhos montados em `/app`.
 
 O dashboard inicial é uma página própria de estado operacional. Ele não serve nem reutiliza o HTML legado produzido por `generate_trade_report.py`; `reports/` permanece reservado para exportações futuras.
 
