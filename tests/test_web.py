@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +28,7 @@ class WebTests(unittest.TestCase):
         self.config_dir.mkdir()
         self.source_dir.mkdir()
         self.data_dir.mkdir()
+
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp_path)
 
@@ -36,6 +37,12 @@ class WebTests(unittest.TestCase):
             "algobotdash.web",
             CONFIG_PATH=self.config_dir / "config.yaml",
             DATABASE_PATH=self.data_dir / "algobotdash.sqlite",
+        )
+
+    def _write_config(self) -> None:
+        (self.config_dir / "config.yaml").write_text(
+            f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
+            encoding="utf-8",
         )
 
     def test_dashboard_serves_own_static_page(self) -> None:
@@ -72,11 +79,7 @@ class WebTests(unittest.TestCase):
         self.assertIn(str(self.config_dir / "config.yaml"), payload["error"])
 
     def test_health_reports_valid_configuration_and_source(self) -> None:
-        config_path = self.config_dir / "config.yaml"
-        config_path.write_text(
-            f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
-            encoding="utf-8",
-        )
+        self._write_config()
         (self.source_dir / "ReportHistory.xlsx").write_bytes(b"fixture")
 
         with self._paths():
@@ -87,11 +90,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(payload["projection"], "unavailable")
 
     def test_health_reports_valid_configuration_with_missing_source(self) -> None:
-        config_path = self.config_dir / "config.yaml"
-        config_path.write_text(
-            f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
-            encoding="utf-8",
-        )
+        self._write_config()
 
         with self._paths():
             payload = health()
@@ -100,11 +99,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(payload["source"], "missing")
 
     def test_health_reports_invalid_projection_when_database_is_unreadable(self) -> None:
-        config_path = self.config_dir / "config.yaml"
-        config_path.write_text(
-            f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
-            encoding="utf-8",
-        )
+        self._write_config()
         database_path = self.data_dir / "algobotdash.sqlite"
         database_path.write_bytes(b"projection")
 
@@ -114,11 +109,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(payload["projection"], "invalid")
 
     def test_health_reports_valid_projection_and_last_import(self) -> None:
-        config_path = self.config_dir / "config.yaml"
-        config_path.write_text(
-            f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
-            encoding="utf-8",
-        )
+        self._write_config()
         database_path = self.data_dir / "algobotdash.sqlite"
         connection = sqlite3.connect(database_path)
         connection.executescript(SCHEMA)

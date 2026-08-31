@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
 
-SRC=Path('ReportHistory-2002705608.xlsx'); OUT=Path('reports'); OUT.mkdir(exist_ok=True)
+SRC=Path('source/ReportHistory-2002705608.xlsx'); OUT=Path('reports'); OUT.mkdir(exist_ok=True)
 REPORT_TZ=ZoneInfo('America/Bahia'); START=datetime(2026,4,1,tzinfo=REPORT_TZ); SEED=20260829
 COLORS={'BIT FVG':'#f59e0b','BIT Turtle':'#8b5cf6','WDO FVG':'#06b6d4','WDO RadarWDO':'#ef4444','WDO Turtle':'#22c55e','WIN EngulfPattern':'#f97316','WIN FVG':'#3b82f6','WIN RadarWIN':'#e11d48','WIN Soberano':'#a855f7','WIN Turtle':'#14b8a6'}
 class Trade(TypedDict):
@@ -84,14 +84,17 @@ def m(xs: list[float]) -> Metrics:
     return {'n':n,'net':sum(xs),'pf':gp/gl if gl else (99 if gp else None),'wr':len(wins)/n,'pay':(sum(wins)/len(wins))/(gl/len(losses)) if wins and losses else None,'exp':avg,'dd':dd,'sh':avg/sd if sd else None,'so':avg/down if down else None,'dur':dur}
 def bs(xs: list[float],reps: int=2000) -> Bootstrap | None:
     if len(xs)<10:return None
-    rng=random.Random(SEED+len(xs)); n=len(xs); o=[m([xs[rng.randrange(n)] for _ in range(n)]) for _ in range(reps)]
+    rng=random.Random(SEED+len(xs))
+    n=len(xs)
+    o=[m([xs[rng.randrange(n)] for _ in range(n)]) for _ in range(reps)]
     def ci(k: str) -> tuple[float, float]:
         a=sorted(x[k] for x in o if x[k] is not None)
         return a[int(.025*len(a))],a[int(.975*len(a))-1]
+
     def optional_ci(k: str) -> tuple[float, float] | None:
         a=sorted(x[k] for x in o if x[k] is not None)
-        if not a:return None
-        return a[int(.025*len(a))],a[int(.975*len(a))-1]
+        return (a[int(.025*len(a))], a[int(.975*len(a))-1]) if a else None
+
     return {'net':ci('net'),'exp':ci('exp'),'pf':optional_ci('pf'),'p':sum(x['pf']>1 for x in o if x['pf'] is not None)/len(o)}
 def mc(xs: list[float],reps: int=2500):
     if len(xs)<10:return None

@@ -77,7 +77,7 @@ def load_config(path: str | Path) -> ImportConfig:
     symbols = symbols_section.get("prefixes", {})
     if not isinstance(symbols, dict):
         raise ConfigurationError("symbols.prefixes deve ser um mapa")
-    if any(str(prefix) == "" for prefix in symbols):
+    if any(not str(prefix) for prefix in symbols):
         raise ConfigurationError("symbols.prefixes não pode conter prefixos vazios")
     strategies_section = raw.get("strategies", {})
     if not isinstance(strategies_section, Mapping):

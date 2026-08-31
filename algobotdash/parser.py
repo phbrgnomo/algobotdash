@@ -205,7 +205,28 @@ def _parse_orders(rows: Iterable[tuple[int, tuple[Any, ...]]], config: ImportCon
     return orders, strategies, rejected
 
 
-def _parse_transactions(rows: Iterable[tuple[int, tuple[Any, ...]]], order_strategies: dict[str, str | None]) -> tuple[list[TransactionRecord], list[RejectedRecord]]:
+_TRANSACTION_NUMERIC_FIELDS = (5, 6, 8, 9, 10, 11, 12)
+
+
+def _parse_transaction_numeric_values(row: tuple[Any, ...]) -> dict[int, float | None]:
+    return {index: _number(_cell(row, index)) for index in _TRANSACTION_NUMERIC_FIELDS}
+
+
+def _invalid_transaction_numeric_fields(
+    row: tuple[Any, ...], numeric_values: dict[int, float | None]
+) -> list[int]:
+    return [
+        index
+        for index, parsed in numeric_values.items()
+        if _cell(row, index) not in (None, "")
+        and not (isinstance(_cell(row, index), str) and not _cell(row, index).strip())
+        and parsed is None
+    ]
+
+
+def _parse_transactions(
+    rows: Iterable[tuple[int, tuple[Any, ...]]], order_strategies: dict[str, str | None]
+) -> tuple[list[TransactionRecord], list[RejectedRecord]]:
     transactions: list[TransactionRecord] = []
     rejected: list[RejectedRecord] = []
     for row_number, row in rows:
@@ -218,15 +239,8 @@ def _parse_transactions(rows: Iterable[tuple[int, tuple[Any, ...]]], order_strat
             if any(value not in (None, "") for value in row):
                 rejected.append(RejectedRecord(row_number, "campos obrigatórios inválidos em transação", transaction_id))
             continue
-        numeric_values = {index: _number(_cell(row, index)) for index in (5, 6, 8, 9, 10, 11, 12)}
-        invalid_numeric = [
-            index
-            for index, parsed in numeric_values.items()
-            if _cell(row, index) not in (None, "")
-            and not (isinstance(_cell(row, index), str) and not _cell(row, index).strip())
-            and parsed is None
-        ]
-        if invalid_numeric:
+        numeric_values = _parse_transaction_numeric_values(row)
+        if _invalid_transaction_numeric_fields(row, numeric_values):
             rejected.append(RejectedRecord(row_number, "valores numéricos inválidos em transação", transaction_id))
             continue
         strategy = order_strategies.get(order_id)
