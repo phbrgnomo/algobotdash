@@ -7,12 +7,14 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 
-from algobotdash.storage import SCHEMA
+from algobotdash.storage import SCHEMA, read_positions
 from algobotdash.web import app
 
 
@@ -60,52 +62,60 @@ class QueryApiTests(unittest.TestCase):
         with self._paths():
             return asyncio.run(request())
 
-    def _seed_projection(self) -> None:
+    @contextmanager
+    def _projection(self) -> Iterator[sqlite3.Connection]:
+        """Create a projection fixture and always close its SQLite connection."""
         connection = sqlite3.connect(self.database_path)
-        connection.executescript(SCHEMA)
-        connection.executemany(
-            "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                (1, "older.xlsx", "old-hash", "2026-08-30T10:00:00+00:00", 3, 2, 1, 0),
+        try:
+            connection.executescript(SCHEMA)
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _seed_projection(self) -> None:
+        with self._projection() as connection:
+            connection.executemany(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (1, "older.xlsx", "old-hash", "2026-08-30T10:00:00+00:00", 3, 2, 1, 0),
+                    (
+                        2, "ReportHistory.xlsx", "new-hash", "2026-08-31T10:00:00+00:00",
+                        4, 3, 1, 1,
+                    ),
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO positions("
+                "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
+                "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
+                "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        "100", "Turtle", "WIN", "WINQ26", "buy", "2026-08-01T10:00:00-03:00",
+                        "2026-08-01T11:00:00-03:00", "closed", 1, 1, 100, 110, -1, 0, 9, 2,
+                    ),
+                    (
+                        "200", None, "WDO", "WDOU26", "sell", "2026-08-02T10:00:00+00:00",
+                        None, "open", 1, 1, 200, None, -1, 0, 999, 2,
+                    ),
+                    (
+                        "300", "FVG", "WIN", "WINV26", "buy", "2026-08-03T10:00:00+00:00",
+                        "2026-08-03T12:00:00+00:00", "closed", 1, 1, 300, 280, -1, 0, -21, 2,
+                    ),
+                ],
+            )
+            connection.execute(
+                "INSERT INTO orders("
+                "order_id, position_id, strategy, symbol_raw, direction, opened_at, event_at, "
+                "status, volume_requested, volume_executed, price, stop_loss, take_profit, "
+                "comment, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    2, "ReportHistory.xlsx", "new-hash", "2026-08-31T10:00:00+00:00",
-                    4, 3, 1, 1,
+                    "500", "100", "Turtle", "WINQ26", "buy", "2026-08-01T09:59:00-03:00",
+                    "2026-08-01T10:00:00-03:00", "filled", 1, 1, 100, None, None,
+                    "TurtleS2", 2,
                 ),
-            ],
-        )
-        connection.executemany(
-            "INSERT INTO positions("
-            "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
-            "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
-            "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                (
-                    "100", "Turtle", "WIN", "WINQ26", "buy", "2026-08-01T10:00:00-03:00",
-                    "2026-08-01T11:00:00-03:00", "closed", 1, 1, 100, 110, -1, 0, 9, 2,
-                ),
-                (
-                    "200", None, "WDO", "WDOU26", "sell", "2026-08-02T10:00:00+00:00",
-                    None, "open", 1, 1, 200, None, -1, 0, -3, 2,
-                ),
-                (
-                    "300", "FVG", "WIN", "WINV26", "buy", "2026-08-03T10:00:00+00:00",
-                    "2026-08-03T12:00:00+00:00", "closed", 1, 1, 300, 280, -1, 0, -21, 2,
-                ),
-            ],
-        )
-        connection.execute(
-            "INSERT INTO orders("
-            "order_id, position_id, strategy, symbol_raw, direction, opened_at, event_at, status, "
-            "volume_requested, volume_executed, price, stop_loss, take_profit, comment, import_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "500", "100", "Turtle", "WINQ26", "buy", "2026-08-01T09:59:00-03:00",
-                "2026-08-01T10:00:00-03:00", "filled", 1, 1, 100, None, None,
-                "TurtleS2", 2,
-            ),
-        )
-        connection.commit()
-        connection.close()
+            )
 
     def test_positions_are_paginated_sorted_and_preserve_unknown_strategy(self) -> None:
         """List positions by a public sort and preserve an unproven strategy."""
@@ -144,6 +154,31 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(self._request("/api/positions?sort_by=comment").status_code, 422)
         self.assertEqual(self._request("/api/positions?sort_order=sideways").status_code, 422)
 
+    def test_storage_rejects_sort_tokens_outside_allowlists(self) -> None:
+        """Keep SQL ordering tokens restricted even outside the validated HTTP API."""
+        self._seed_projection()
+
+        with self.assertRaisesRegex(ValueError, "ordenação de posições inválida"):
+            _ = read_positions(
+                self.database_path,
+                limit=10,
+                offset=0,
+                sort_by="opened_at",
+                sort_order="DESC; DROP TABLE positions",
+            )
+
+    def test_realized_pnl_sort_uses_the_exposed_realized_value(self) -> None:
+        """Keep open positions without realized P&L after realized positions."""
+        self._seed_projection()
+
+        response = self._request("/api/positions?sort_by=realized_pnl&sort_order=desc")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["position_id"] for item in response.json()["items"]],
+            ["100", "300", "200"],
+        )
+
     def test_position_orders_use_report_identifier_and_distinguish_missing_position(self) -> None:
         """Use stable report IDs and distinguish no orders from no position."""
         self._seed_projection()
@@ -163,7 +198,6 @@ class QueryApiTests(unittest.TestCase):
     def test_strategies_imports_and_status_expose_read_contract(self) -> None:
         """Expose configuration, valid history, and the current projection state."""
         self._seed_projection()
-
         strategies = self._request("/api/strategies")
         imports = self._request("/api/imports?limit=1")
         status = self._request("/api/status")
@@ -182,10 +216,8 @@ class QueryApiTests(unittest.TestCase):
 
     def test_status_is_empty_without_import_and_queries_report_unavailable_projection(self) -> None:
         """Keep status readable while rejecting queries without a projection."""
-        connection = sqlite3.connect(self.database_path)
-        connection.executescript(SCHEMA)
-        connection.commit()
-        connection.close()
+        with self._projection():
+            pass
 
         empty_status = self._request("/api/status")
         self.assertEqual(empty_status.status_code, 200)
@@ -199,12 +231,9 @@ class QueryApiTests(unittest.TestCase):
 
     def test_status_marks_partial_projection_as_unavailable(self) -> None:
         """Reject a database that lacks a table required by query endpoints."""
-        connection = sqlite3.connect(self.database_path)
-        connection.executescript(SCHEMA)
-        connection.execute("DROP TABLE transactions")
-        connection.execute("CREATE TABLE transactions (id INTEGER PRIMARY KEY)")
-        connection.commit()
-        connection.close()
+        with self._projection() as connection:
+            connection.execute("DROP TABLE transactions")
+            connection.execute("CREATE TABLE transactions (id INTEGER PRIMARY KEY)")
 
         status = self._request("/api/status")
 
@@ -214,32 +243,29 @@ class QueryApiTests(unittest.TestCase):
 
     def test_positions_sort_subsecond_timestamps_chronologically(self) -> None:
         """Keep timestamp ordering precise below whole-second resolution."""
-        connection = sqlite3.connect(self.database_path)
-        connection.executescript(SCHEMA)
-        connection.execute(
-            "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
-        )
-        connection.executemany(
-            "INSERT INTO positions("
-            "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
-            "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
-            "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                (
-                    "a-later", None, None, "WINQ26", "buy",
-                    "2026-08-01T10:00:00.000400-03:00", None, "open", None, None,
-                    None, None, 0, 0, 0, 1,
-                ),
-                (
-                    "z-earlier", None, None, "WINQ26", "buy",
-                    "2026-08-01T10:00:00.000100-03:00", None, "open", None, None,
-                    None, None, 0, 0, 0, 1,
-                ),
-            ],
-        )
-        connection.commit()
-        connection.close()
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            connection.executemany(
+                "INSERT INTO positions("
+                "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
+                "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
+                "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        "a-later", None, None, "WINQ26", "buy",
+                        "2026-08-01T10:00:00.000400-03:00", None, "open", None, None,
+                        None, None, 0, 0, 0, 1,
+                    ),
+                    (
+                        "z-earlier", None, None, "WINQ26", "buy",
+                        "2026-08-01T10:00:00.000100-03:00", None, "open", None, None,
+                        None, None, 0, 0, 0, 1,
+                    ),
+                ],
+            )
 
         response = self._request("/api/positions?sort_by=opened_at&sort_order=asc")
 
@@ -248,3 +274,55 @@ class QueryApiTests(unittest.TestCase):
             [item["position_id"] for item in response.json()["items"]],
             ["z-earlier", "a-later"],
         )
+
+    def test_positions_reject_timezone_naive_timestamp(self) -> None:
+        """Reject a projection whose position timestamp has no timezone offset."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 1, 1, 0, 0),
+            )
+            connection.execute(
+                "INSERT INTO positions("
+                "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
+                "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
+                "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "naive", None, None, "WINQ26", "buy", "2026-08-01T10:00:00", None,
+                    "open", None, None, None, None, 0, 0, 0, 1,
+                ),
+            )
+
+        response = self._request("/api/positions?sort_by=opened_at")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["code"], "projection_unavailable")
+
+    def test_imports_reject_malformed_timestamp(self) -> None:
+        """Reject a projection whose valid-import history contains an invalid timestamp."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "not-a-timestamp", 1, 1, 0, 0),
+            )
+
+        response = self._request("/api/imports")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["code"], "projection_unavailable")
+
+    def test_imports_sort_by_utc_timestamp_before_identifier(self) -> None:
+        """Order imports by their UTC instant rather than local timestamp text."""
+        with self._projection() as connection:
+            connection.executemany(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (1, "later.xlsx", "later", "2026-08-01T10:00:00-03:00", 1, 1, 0, 0),
+                    (2, "earlier.xlsx", "earlier", "2026-08-01T11:00:00+00:00", 1, 1, 0, 0),
+                ],
+            )
+
+        response = self._request("/api/imports")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["id"] for item in response.json()["items"]], [1, 2])

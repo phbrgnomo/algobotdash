@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
 import sqlite3
-import subprocess
+import subprocess  # nosec B404 -- required to execute the fixed Node.js test harness
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +16,8 @@ import httpx
 
 from algobotdash.storage import SCHEMA
 from algobotdash.web import app, dashboard, health
+
+NODE_EXECUTABLE = shutil.which("node")
 
 
 class WebTests(unittest.TestCase):
@@ -83,7 +84,7 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="next-page"', content)
         self.assertIn("Projeção indisponível.", content)
 
-    @unittest.skipUnless(shutil.which("node"), "requires Node.js for JavaScript execution")
+    @unittest.skipUnless(NODE_EXECUTABLE, "requires Node.js for JavaScript execution")
     def test_dashboard_recovers_positions_when_projection_returns_with_same_hash(self) -> None:
         """Reload positions after unavailable state even when source hash is unchanged."""
         runner = r"""
@@ -106,6 +107,8 @@ elements["#sort-order"].value = "desc";
 let state = "ready";
 let interval;
 let positionFetches = 0;
+let mode = "retry";
+const pending = [];
 const payload = () => ({state, configuration: "valid", source: "available",
   projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
   last_import: state === "ready" ? {source_hash: "same-hash", imported_at: "2026-08-01T00:00:00+00:00"} : null});
@@ -114,6 +117,8 @@ const context = {
   fetch: async (url) => {
     if (url === "/api/status") return {ok: true, json: async () => payload()};
     positionFetches += 1;
+    if (mode === "retry" && positionFetches === 1) return {ok: false, json: async () => ({})};
+    if (mode === "race") return new Promise((resolve) => pending.push(resolve));
     return {ok: true, json: async () => ({items: [], total: 0})};
   },
   setInterval: (callback) => { interval = callback; return 1; },
@@ -123,18 +128,38 @@ vm.runInNewContext(source, context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 (async () => {
   await flush(); await flush();
+  await interval();
+  if (positionFetches !== 2) throw new Error(`expected retry after failed load, got ${positionFetches}`);
   state = "unavailable";
   await interval();
+  if (elements["#page-summary"].textContent !== "Projeção indisponível.") throw new Error("missing unavailable table state");
+  if (elements["#table-state"].hidden || !elements["#table-state"].textContent.includes("projeção SQLite está indisponível")) throw new Error("missing unavailable error notice");
+  if (!elements["#previous-page"].disabled || !elements["#next-page"].disabled) throw new Error("pagination remains enabled");
   state = "ready";
   await interval();
-  if (positionFetches !== 2) throw new Error(`expected 2 position fetches, got ${positionFetches}`);
+  if (positionFetches !== 3) throw new Error(`expected recovery fetch, got ${positionFetches}`);
+  if (elements["#table-state"].hidden !== true || elements["#table-state"].textContent !== "") throw new Error("stale unavailable notice");
+  mode = "race";
+  elements["#sort-by"].value = "opened_at";
+  elements["#sort-by"].listeners.change();
+  elements["#sort-by"].value = "status";
+  elements["#sort-by"].listeners.change();
+  if (pending.length !== 2) throw new Error(`expected 2 pending requests, got ${pending.length}`);
+  pending[1]({ok: true, json: async () => ({items: [{position_id: "new", strategy: null, symbol_family: null, direction: "buy", opened_at: null, closed_at: null, status: "open", realized_pnl: null}], total: 1})});
+  await flush();
+  pending[0]({ok: true, json: async () => ({items: [{position_id: "old", strategy: null, symbol_family: null, direction: "buy", opened_at: null, closed_at: null, status: "open", realized_pnl: null}], total: 1})});
+  await flush();
+  if (elements["#positions-body"].children[0].children[0].textContent !== "new") throw new Error("stale response overwrote current table");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
-        result = subprocess.run(
-            ["node", "-e", runner],
+        node_executable = NODE_EXECUTABLE
+        if node_executable is None:
+            self.skipTest("requires Node.js for JavaScript execution")
+        result = subprocess.run(  # nosec B603 -- absolute executable and fixed test script
+            [node_executable, "-e", runner],
             check=False,
             capture_output=True,
-            env={**os.environ, "DASHBOARD_PATH": str(Path(dashboard().path))},
+            env={"DASHBOARD_PATH": str(Path(dashboard().path))},
             text=True,
         )
 

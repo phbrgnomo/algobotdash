@@ -18,10 +18,11 @@ ProjectionRow: TypeAlias = dict[str, Any]
 POSITION_SORT_COLUMNS = {
     "opened_at": "utc_timestamp(entry_at)",
     "closed_at": "utc_timestamp(exit_at)",
-    "realized_pnl": "pnl",
+    "realized_pnl": "CASE WHEN status = 'open' THEN NULL ELSE pnl END",
     "symbol_family": "symbol_family",
     "status": "status",
 }
+SORT_ORDERS = {"asc": "ASC", "desc": "DESC"}
 
 REQUIRED_TABLE_COLUMNS = {
     "schema_version": {"version"},
@@ -187,32 +188,40 @@ def _open_projection(path: Path) -> sqlite3.Connection:
         connection.create_function(
             "utc_timestamp", 1, _utc_timestamp, deterministic=True
         )
-        tables = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
-        required_tables = set(REQUIRED_TABLE_COLUMNS)
-        if missing_tables := required_tables - tables:
-            raise ValueError(f"tabelas ausentes: {sorted(missing_tables)}")
-        for table, required_columns in REQUIRED_TABLE_COLUMNS.items():
-            columns = {
-                row[1] for row in connection.execute(f"PRAGMA table_info({table})")
-            }
-            if missing_columns := required_columns - columns:
-                raise ValueError(
-                    f"colunas ausentes em {table}: {sorted(missing_columns)}"
-                )
-        version_row = connection.execute("SELECT version FROM schema_version").fetchone()
-        version = version_row[0] if version_row else None
-        if version != CURRENT_SCHEMA_VERSION:
-            raise ValueError(f"versão de schema SQLite não suportada: {version}")
+        _validate_projection(connection)
         return connection
     except (OSError, sqlite3.Error, ValueError) as exc:
         if connection is not None:
             connection.close()
         raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
+
+
+def _validate_projection(connection: sqlite3.Connection) -> None:
+    """Validate the tables, columns and schema version of an open projection."""
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    required_tables = set(REQUIRED_TABLE_COLUMNS)
+    if missing_tables := required_tables - tables:
+        raise ValueError(f"tabelas ausentes: {sorted(missing_tables)}")
+    for table, required_columns in REQUIRED_TABLE_COLUMNS.items():
+        columns = {
+            row[1]
+            for row in connection.execute(
+                f"PRAGMA table_info({table})"  # nosec B608 -- constant table allowlist
+            )
+        }
+        if missing_columns := required_columns - columns:
+            raise ValueError(
+                f"colunas ausentes em {table}: {sorted(missing_columns)}"
+            )
+    version_row = connection.execute("SELECT version FROM schema_version").fetchone()
+    version = version_row[0] if version_row else None
+    if version != CURRENT_SCHEMA_VERSION:
+        raise ValueError(f"versão de schema SQLite não suportada: {version}")
 
 
 def _page_rows(
@@ -265,9 +274,12 @@ def read_positions(
     sort_order: str,
 ) -> tuple[list[ProjectionRow], int]:
     """Read a deterministic page of analytical positions from the projection."""
-    column = POSITION_SORT_COLUMNS[sort_by]
-    order = sort_order.upper()
-    query = (
+    try:
+        column = POSITION_SORT_COLUMNS[sort_by]
+        order = SORT_ORDERS[sort_order]
+    except KeyError as exc:
+        raise ValueError("ordenação de posições inválida") from exc
+    query = (  # nosec B608 -- column and order come from fixed allowlists
         "SELECT position_id, strategy, symbol_family, "
         "CASE WHEN strategy IS NOT NULL AND symbol_family IS NOT NULL "
         "THEN symbol_family || ' ' || strategy END AS strategy_key, "
@@ -342,7 +354,7 @@ def read_imports(
     query = (
         "SELECT id, source_name, source_hash, imported_at, rows_read, positions_created, "
         "no_comment_count, rejected_count FROM imports "
-        "ORDER BY imported_at DESC, id DESC LIMIT ? OFFSET ?"
+        "ORDER BY utc_timestamp(imported_at) DESC, id DESC LIMIT ? OFFSET ?"
     )
     connection = _open_projection(path)
     try:

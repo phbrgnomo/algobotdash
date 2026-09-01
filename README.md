@@ -38,11 +38,13 @@ Enquanto o dashboard está sendo implementado, o relatório existente pode ser g
 
 ### Importação para SQLite
 
-O primeiro slice da Issue #2 reconstrói uma projeção SQLite a partir das seções `Posições`, `Ordens` e `Transações` do relatório. Copie `config.example.yaml` para `config.yaml`, ajuste o caminho da fonte e execute:
+O primeiro slice da Issue #2 reconstrói uma projeção SQLite a partir das seções `Posições`, `Ordens` e `Transações` do relatório. Copie `config.example.yaml` para `config/config.yaml`, ajuste o caminho da fonte e execute:
 
 ```bash
+mkdir -p config
+cp config.example.yaml config/config.yaml
 poetry install
-poetry run python -m algobotdash --config config.yaml --database data/algobotdash.sqlite
+poetry run python -m algobotdash --config config/config.yaml --database data/algobotdash.sqlite
 ```
 
 A atualização escreve uma base temporária e só a publica ao concluir. A projeção contém `imports`, `positions`, `orders`, `transactions` e `rejected_rows`; comentários sem grupo ficam preservados com `strategy` nula. A API mantém grupo e família do símbolo separados para auditoria e expõe a identidade analítica derivada `strategy_key` no formato `WIN FVG`, inclusive no catálogo observado `/api/strategy-keys`. Uma ambiguidade de agrupamento interrompe a atualização e mantém a última projeção válida.

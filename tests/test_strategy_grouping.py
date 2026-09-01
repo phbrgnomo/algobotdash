@@ -121,9 +121,11 @@ class StrategyGroupingTests(unittest.TestCase):
         self.assertEqual(strategy_keys.status_code, 503)
         self.assertEqual(strategy_keys.json()["detail"]["code"], "projection_unavailable")
 
-    def test_dashboard_displays_the_symbol_qualified_strategy(self) -> None:
-        """Use strategy_key, rather than the generic group, in the position table."""
+    def test_dashboard_displays_strategy_name(self) -> None:
+        """Display the strategy name while keeping strategy_key in the API contract."""
         content = Path(dashboard().path).read_text(encoding="utf-8")
 
-        self.assertIn("Estratégia analítica", content)
-        self.assertIn("position.strategy_key", content)
+        self.assertIn("<th>ID</th><th>Estratégia</th>", content)
+        self.assertIn('position.strategy || "Não associada"', content)
+        self.assertNotIn("Estratégia analítica", content)
+        self.assertNotIn("position.strategy_key ||", content)

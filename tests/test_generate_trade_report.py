@@ -14,6 +14,10 @@ from tests.fixture_helpers import workbook
 class LegacyReportTests(unittest.TestCase):
     """Verify report metrics, escaping, and file generation."""
 
+    def test_default_config_path_matches_application_convention(self) -> None:
+        """The legacy generator should use the documented config location."""
+        self.assertEqual(report.CONFIG_PATH, Path("config/config.yaml"))
+
     def test_metrics_handle_empty_and_edge_samples(self) -> None:
         """Metrics should remain defined for empty, winning, and losing samples."""
         self.assertEqual(report.m([])["n"], 0)
