@@ -62,6 +62,14 @@ _Avoid_: agrupar somente por comentário, misturar a mesma regra entre famílias
 Conferência entre o P&L consolidado das posições e a soma das transações do relatório, sem usar essa conferência para inventar vínculos por estratégia.
 _Avoid_: atribuição de saída por igualdade de P&L
 
+**Ajuste de saldo**:
+Lançamento contábil diário que altera o saldo disponível, mas não representa resultado operacional nem compõe o P&L de uma estratégia.
+_Avoid_: operação, ganho ou perda da estratégia
+
+**Saldo de abertura ajustado**:
+Capital contábil disponível no início operacional do dia, após o ajuste de saldo de abertura e antes dos resultados operacionais daquele dia. É a referência de capital para métricas temporais.
+_Avoid_: capital informado manualmente, saldo após incorporar operações do dia
+
 **Posição analítica**:
 Unidade de análise do MVP, identificada pelo registro de posição; é classificada pela ordem correspondente quando `position_id` e `symbol_raw` coincidem e a ordem possui uma estratégia. Ciclos de piramidação não são inferidos nesta versão.
 _Avoid_: ciclo implícito, agrupamento por proximidade
@@ -98,6 +106,14 @@ _Avoid_: sincronização silenciosa
 Resultado calculado sobre as posições analíticas normalizadas e recalculado conforme o filtro solicitado.
 _Avoid_: valor pré-calculado permanente
 
+**Métricas gerais**:
+Resultados calculados sobre todas as posições analíticas realizadas que atendem aos filtros, inclusive posições sem estratégia comprovada. Métricas por estratégia consideram somente posições com identidade analítica de estratégia.
+_Avoid_: excluir resultado não classificado do total, atribuir estratégia sem vínculo comprovado
+
+**Data analítica**:
+Data de saída de uma posição realizada e data de entrada de uma posição aberta; é a referência usada pelo filtro de período.
+_Avoid_: misturar data de entrada e data de saída sem declarar a convenção
+
 **Posição aberta**:
 Posição que possui entrada sem saída correspondente no relatório; permanece rastreável, mas não entra nas métricas realizadas além do P&L explicitamente informado pela fonte.
 _Avoid_: trade perdido
@@ -106,9 +122,13 @@ _Avoid_: trade perdido
 Registro preservado em um agregado separado para rastreabilidade, mas excluído das métricas por estratégia.
 _Avoid_: sem estratégia
 
-**Métrica por trade**:
+**Métrica por posição**:
 Métrica calculada tratando cada posição realizada como uma observação, sem anualização implícita.
-_Avoid_: métrica diária
+_Avoid_: métrica por trade, métrica diária
+
+**Expectância**:
+Valor esperado por posição realizada, calculado como a média aritmética de seu P&L líquido.
+_Avoid_: expectativa, potencial de lucro
 
 **Importação**:
 Execução identificada por hash da fonte, horário, contagens de linhas, posições, registros sem comentário e rejeições.
