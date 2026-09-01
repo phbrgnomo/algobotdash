@@ -16,8 +16,10 @@ from zoneinfo import ZoneInfo
 from openpyxl import load_workbook
 
 from algobotdash.config import load_config
+from algobotdash.environment import load_environment
 
-CONFIG_PATH = Path(os.getenv("ALGOBOTDASH_CONFIG", "config.yaml"))
+_ = load_environment()
+CONFIG_PATH = Path(os.getenv("ALGOBOTDASH_CONFIG", "config/config.yaml"))
 OUT = Path("reports")
 OUT.mkdir(exist_ok=True)
 REPORT_TZ = ZoneInfo("America/Bahia")

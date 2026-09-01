@@ -7,12 +7,50 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from .parser import OrderRecord, PositionRecord, RejectedRecord, TransactionRecord
 
 CURRENT_SCHEMA_VERSION = 2
 ImportHistoryRow: TypeAlias = tuple[int, str, str, str, int, int, int, int]
+ProjectionRow: TypeAlias = dict[str, Any]
+
+POSITION_SORT_COLUMNS = {
+    "opened_at": "utc_timestamp(entry_at)",
+    "closed_at": "utc_timestamp(exit_at)",
+    "realized_pnl": "CASE WHEN status = 'open' THEN NULL ELSE pnl END",
+    "symbol_family": "symbol_family",
+    "status": "status",
+}
+SORT_ORDERS = {"asc": "ASC", "desc": "DESC"}
+
+REQUIRED_TABLE_COLUMNS = {
+    "schema_version": {"version"},
+    "imports": {
+        "id", "source_name", "source_hash", "imported_at", "rows_read",
+        "positions_created", "no_comment_count", "rejected_count",
+    },
+    "positions": {
+        "id", "position_id", "strategy", "symbol_family", "symbol_raw", "direction",
+        "entry_at", "exit_at", "status", "volume_requested", "volume_executed",
+        "entry_price", "exit_price", "commission", "swap", "pnl", "import_id",
+    },
+    "orders": {
+        "id", "order_id", "position_id", "strategy", "symbol_raw", "direction",
+        "opened_at", "event_at", "status", "volume_requested", "volume_executed",
+        "price", "stop_loss", "take_profit", "comment", "import_id",
+    },
+    "transactions": {
+        "id", "transaction_id", "order_id", "position_id", "strategy", "at",
+        "symbol_raw", "direction", "volume", "price", "commission", "tax", "swap",
+        "pnl", "balance", "comment", "import_id",
+    },
+    "rejected_rows": {"id", "import_id", "row_number", "position_id", "reason"},
+}
+
+
+class ProjectionUnavailableError(RuntimeError):
+    """Raised when the derived SQLite projection cannot be queried safely."""
 
 
 @dataclass(frozen=True)
@@ -123,11 +161,8 @@ def read_import_history(path: Path) -> list[ImportHistoryRow]:
             raise ValueError(f"schema SQLite incompatível: tabela imports ausente em {path}")
         if "schema_version" not in tables:
             raise ValueError(f"schema SQLite incompatível em {path}: tabela schema_version ausente")
-        version_row = connection.execute("SELECT version FROM schema_version").fetchone()
-        version = version_row[0] if version_row else None
+        _validate_schema_version(connection)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(imports)")}
-        if version != CURRENT_SCHEMA_VERSION:
-            raise ValueError(f"versão de schema SQLite não suportada: {version}")
         if "positions_created" in columns:
             return connection.execute(
                 "SELECT id, source_name, source_hash, imported_at, rows_read, "
@@ -135,6 +170,200 @@ def read_import_history(path: Path) -> list[ImportHistoryRow]:
                 "FROM imports ORDER BY id"
             ).fetchall()
         raise ValueError(f"schema SQLite incompatível em {path}: coluna positions_created ausente")
+    finally:
+        connection.close()
+
+
+def _open_projection(path: Path) -> sqlite3.Connection:
+    """Open a compatible projection in read-only mode or raise a stable error."""
+    if not path.is_file():
+        raise ProjectionUnavailableError("projeção SQLite indisponível")
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.create_function(
+            "utc_timestamp", 1, _utc_timestamp, deterministic=True
+        )
+        _validate_projection(connection)
+        return connection
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        if connection is not None:
+            connection.close()
+        raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
+
+
+def _validate_projection(connection: sqlite3.Connection) -> None:
+    """Validate the tables, columns and schema version of an open projection."""
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    required_tables = set(REQUIRED_TABLE_COLUMNS)
+    if missing_tables := required_tables - tables:
+        raise ValueError(f"tabelas ausentes: {sorted(missing_tables)}")
+    for table, required_columns in REQUIRED_TABLE_COLUMNS.items():
+        columns = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM pragma_table_info(?)",
+                (table,),
+            )
+        }
+        if missing_columns := required_columns - columns:
+            raise ValueError(
+                f"colunas ausentes em {table}: {sorted(missing_columns)}"
+            )
+    _validate_schema_version(connection)
+
+
+def _validate_schema_version(connection: sqlite3.Connection) -> None:
+    """Require exactly one supported schema-version row."""
+    versions = [row[0] for row in connection.execute("SELECT version FROM schema_version")]
+    if versions != [CURRENT_SCHEMA_VERSION]:
+        raise ValueError(f"versão de schema SQLite não suportada: {versions}")
+
+
+def _page_rows(
+    connection: sqlite3.Connection,
+    query: str,
+    count_query: str,
+    limit: int,
+    offset: int,
+) -> tuple[list[ProjectionRow], int]:
+    """Return a page and its total from a read-only projection query."""
+    try:
+        total = connection.execute(count_query).fetchone()[0]
+        rows = connection.execute(query, (limit, offset)).fetchall()
+    except sqlite3.Error as exc:
+        raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
+    return [dict(row) for row in rows], total
+
+
+def _utc_timestamp(value: object) -> str | None:
+    """Normalize an offset-aware persisted timestamp to ISO 8601 UTC."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ProjectionUnavailableError("projeção SQLite indisponível")
+    try:
+        timestamp = datetime.fromisoformat(value)
+        if timestamp.tzinfo is None:
+            raise ValueError("timestamp sem fuso horário")
+    except ValueError as exc:
+        raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
+    return timestamp.astimezone(timezone.utc).isoformat()
+
+
+def _normalize_timestamps(
+    rows: list[ProjectionRow], *fields: str
+) -> list[ProjectionRow]:
+    """Normalize selected timestamp fields while keeping other row values intact."""
+    for row in rows:
+        for field in fields:
+            row[field] = _utc_timestamp(row[field])
+    return rows
+
+
+def read_positions(
+    path: Path,
+    *,
+    limit: int,
+    offset: int,
+    sort_by: str,
+    sort_order: str,
+) -> tuple[list[ProjectionRow], int]:
+    """Read a deterministic page of analytical positions from the projection."""
+    try:
+        column = POSITION_SORT_COLUMNS[sort_by]
+        order = SORT_ORDERS[sort_order]
+    except KeyError as exc:
+        raise ValueError("ordenação de posições inválida") from exc
+    query = (  # nosec B608 -- column and order come from fixed allowlists
+        "SELECT position_id, strategy, symbol_family, "
+        "CASE WHEN strategy IS NOT NULL AND symbol_family IS NOT NULL "
+        "THEN symbol_family || ' ' || strategy END AS strategy_key, "
+        "direction, entry_at AS opened_at, "
+        "exit_at AS closed_at, status, "
+        "CASE WHEN status = 'open' THEN NULL ELSE pnl END AS realized_pnl "
+        "FROM positions "
+        f"ORDER BY {column} {order}, position_id ASC LIMIT ? OFFSET ?"
+    )
+    connection = _open_projection(path)
+    try:
+        rows, total = _page_rows(
+            connection,
+            query,
+            "SELECT COUNT(*) FROM positions",
+            limit,
+            offset,
+        )
+        return _normalize_timestamps(rows, "opened_at", "closed_at"), total
+    finally:
+        connection.close()
+
+
+def read_strategy_keys(path: Path) -> list[ProjectionRow]:
+    """Return the symbol-qualified strategy identities present in the projection."""
+    connection = _open_projection(path)
+    try:
+        try:
+            rows = connection.execute(
+                "SELECT symbol_family || ' ' || strategy AS strategy_key, "
+                "strategy, symbol_family "
+                "FROM positions WHERE strategy IS NOT NULL AND symbol_family IS NOT NULL "
+                "GROUP BY symbol_family, strategy ORDER BY symbol_family, strategy"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
+        return [dict(row) for row in rows]
+    finally:
+        connection.close()
+
+
+def read_position_orders(path: Path, position_id: str) -> list[ProjectionRow] | None:
+    """Read orders for a known report position identifier, if it exists."""
+    connection = _open_projection(path)
+    try:
+        try:
+            exists = connection.execute(
+                "SELECT 1 FROM positions WHERE position_id = ?", (position_id,)
+            ).fetchone()
+            if exists is None:
+                return None
+            rows = connection.execute(
+                "SELECT order_id, strategy, symbol_raw, direction, opened_at, event_at, "
+                "status, volume_requested, volume_executed, price, stop_loss, "
+                "take_profit, comment FROM orders WHERE position_id = ? "
+                "ORDER BY opened_at ASC, order_id ASC",
+                (position_id,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
+        return _normalize_timestamps(
+            [dict(row) for row in rows], "opened_at", "event_at"
+        )
+    finally:
+        connection.close()
+
+
+def read_imports(
+    path: Path, *, limit: int, offset: int
+) -> tuple[list[ProjectionRow], int]:
+    """Read valid import history in reverse chronological order."""
+    query = (
+        "SELECT id, source_name, source_hash, imported_at, rows_read, positions_created, "
+        "no_comment_count, rejected_count FROM imports "
+        "ORDER BY utc_timestamp(imported_at) DESC, id DESC LIMIT ? OFFSET ?"
+    )
+    connection = _open_projection(path)
+    try:
+        rows, total = _page_rows(
+            connection, query, "SELECT COUNT(*) FROM imports", limit, offset
+        )
+        return _normalize_timestamps(rows, "imported_at"), total
     finally:
         connection.close()
 

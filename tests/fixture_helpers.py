@@ -2,9 +2,41 @@
 
 from __future__ import annotations
 
+import asyncio
+import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
+import httpx
+
 from openpyxl import Workbook
+
+
+_POSITION_INSERT = (
+    "INSERT INTO positions("
+    "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
+    "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
+    "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+def get_asgi(app: object, path: str) -> httpx.Response:
+    """Request one path from an ASGI app without opening a network port."""
+    async def request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get(path)
+
+    return asyncio.run(request())
+
+
+def insert_positions(
+    connection: sqlite3.Connection, rows: Iterable[tuple[object, ...]]
+) -> None:
+    """Insert analytical-position fixture rows using the canonical column order."""
+    connection.executemany(_POSITION_INSERT, rows)
 
 
 def workbook(

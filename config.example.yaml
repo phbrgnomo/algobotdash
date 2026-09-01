@@ -12,7 +12,7 @@ strategies:
     - name: Turtle
       patterns: ["TurtleS2", "TurtlePyr_1", "TurtlePyr_2"]
     - name: FVG
-      patterns: ["FVGscalp"]
+      patterns: ["fvg"]
     - name: RadarWIN
       patterns: ["radarwin"]
     - name: RadarWDO

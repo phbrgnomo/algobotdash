@@ -53,6 +53,7 @@ Construir um dashboard local executado preferencialmente via Docker Compose, com
 - Import metadata is retained separately, including source hash, timestamps and quality counts.
 - YAML is canonical for source path, symbol normalization and strategy grouping; the dashboard reads but does not edit it in the MVP.
 - Strategy grouping supports one logical group containing base and pyramiding comment patterns.
+- The analytical strategy identity is the pair `(symbol_family, strategy_group)`, exposed as a derived key such as `WIN FVG` without discarding either component.
 - A comment matching multiple groups is a configuration error and blocks completion with an explicit warning.
 - Symbols are normalized by configured prefix rules, including WIN, WDO and BIT contract families.
 - Positions are the MVP analytical unit; cycle reconstruction is deferred until the report provides a reliable cycle relationship.
@@ -62,7 +63,7 @@ Construir um dashboard local executado preferencialmente via Docker Compose, com
 - Host volumes are used for YAML configuration and SQLite data; report exports are optional.
 - Default local port is 8765 and remains configurable.
 - The API is read-oriented for queries, with a separate asynchronous refresh operation.
-- Initial API resources include positions, orders, transactions, metrics, strategies, import history and refresh status.
+- Initial API resources include positions, orders, transactions, metrics, configured strategy groups, observed strategy keys, import history and refresh status.
 - Filters use one shared query state across tables and charts.
 - Metrics are calculated on demand. Per-trade Sharpe and Sortino are the default; daily and annualized variants are explicit alternatives.
 - The primary refresh service is the highest test seam. API integration tests and one thin browser smoke test cover external behavior around it.

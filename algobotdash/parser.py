@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -334,6 +334,25 @@ def _parse_orders(
     return orders, strategies, rejected
 
 
+def _associate_position_strategies(
+    positions: Iterable[PositionRecord], orders: Iterable[OrderRecord]
+) -> list[PositionRecord]:
+    """Copy an opening-order strategy only when its ticket and symbol match."""
+    orders_by_ticket = {order.order_id: order for order in orders}
+    associated: list[PositionRecord] = []
+    for position in positions:
+        order = orders_by_ticket.get(position.position_id)
+        if (
+            order is None
+            or order.symbol_raw != position.symbol_raw
+            or order.strategy is None
+        ):
+            associated.append(position)
+            continue
+        associated.append(replace(position, comment=order.comment, strategy=order.strategy))
+    return associated
+
+
 _TRANSACTION_NUMERIC_FIELDS = (5, 6, 8, 9, 10, 11, 12)
 
 
@@ -421,6 +440,7 @@ def read_report(
     position_rows, order_rows, transaction_rows = _report_sections(rows)
     positions, rejected_positions = _parse_positions(position_rows, config)
     orders, order_strategies, rejected_orders = _parse_orders(order_rows, config)
+    positions = _associate_position_strategies(positions, orders)
     transactions, rejected_transactions = _parse_transactions(transaction_rows, order_strategies)
     rejected = rejected_positions + rejected_orders + rejected_transactions
     return (

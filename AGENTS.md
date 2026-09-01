@@ -11,3 +11,7 @@ Use the default labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-
 ### Domain docs
 
 This is a single-context repository. Read `CONTEXT.md` and `docs/adr/` when they exist. See `docs/agents/domain.md`.
+
+### Python Package manager
+
+This project uses Poetry as its package manager.

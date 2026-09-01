@@ -3,8 +3,8 @@ services:
     build: .
     command: ["uvicorn", "algobotdash.web:app", "--host", "0.0.0.0", "--port", "8765"]
     environment:
-      ALGOBOTDASH_CONFIG: /app/config/config.yaml
-      ALGOBOTDASH_DATABASE: /app/data/algobotdash.sqlite
+      ALGOBOTDASH_CONFIG: "${ALGOBOTDASH_CONFIG:-/app/config/config.yaml}"
+      ALGOBOTDASH_DATABASE: "${ALGOBOTDASH_DATABASE:-/app/data/algobotdash.sqlite}"
     user: "${ALGOBOTDASH_UID:-10001}:${ALGOBOTDASH_GID:-10001}"
     ports:
       - "127.0.0.1:${ALGOBOTDASH_PORT:-8765}:8765"

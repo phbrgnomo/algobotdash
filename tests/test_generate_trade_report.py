@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,19 @@ from tests.fixture_helpers import workbook
 
 class LegacyReportTests(unittest.TestCase):
     """Verify report metrics, escaping, and file generation."""
+
+    def test_default_config_path_matches_application_convention(self) -> None:
+        """The legacy generator falls back without process or file configuration."""
+        with tempfile.TemporaryDirectory(prefix="algobotdash-report-env-") as raw_dir:
+            absent_environment = Path(raw_dir) / "absent.env"
+            with patch.dict(
+                os.environ,
+                {"ALGOBOTDASH_ENV_FILE": str(absent_environment)},
+                clear=True,
+            ):
+                isolated_report = importlib.reload(report)
+                self.assertEqual(isolated_report.CONFIG_PATH, Path("config/config.yaml"))
+        importlib.reload(report)
 
     def test_metrics_handle_empty_and_edge_samples(self) -> None:
         """Metrics should remain defined for empty, winning, and losing samples."""

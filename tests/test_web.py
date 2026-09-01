@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import sqlite3
+import subprocess  # nosec B404 -- required to execute the fixed Node.js test harness
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,8 @@ import httpx
 
 from algobotdash.storage import SCHEMA
 from algobotdash.web import app, dashboard, health
+
+NODE_EXECUTABLE = shutil.which("node")
 
 
 class WebTests(unittest.TestCase):
@@ -68,6 +71,121 @@ class WebTests(unittest.TestCase):
         page = response_path.read_text(encoding="utf-8")
         self.assertIn("Dashboard local", page)
         self.assertNotIn("generate_trade_report", page)
+
+    def test_dashboard_static_contract_includes_status_and_positions_view(self) -> None:
+        """Dashboard should retain the query API calls and basic table controls."""
+        page = dashboard().path
+        content = Path(page).read_text(encoding="utf-8")
+
+        self.assertIn('fetch("/api/status"', content)
+        self.assertIn("/api/positions?${query}", content)
+        self.assertIn('id="positions-body"', content)
+        self.assertIn('id="previous-page"', content)
+        self.assertIn('id="next-page"', content)
+        self.assertIn("Projeção indisponível.", content)
+
+    @unittest.skipUnless(NODE_EXECUTABLE, "requires Node.js for JavaScript execution")
+    def test_dashboard_recovers_positions_when_projection_returns_with_same_hash(self) -> None:
+        """Reload positions after unavailable state even when source hash is unchanged."""
+        runner = r"""
+const fs = require("fs");
+const vm = require("vm");
+const html = fs.readFileSync(process.env.DASHBOARD_PATH, "utf8");
+const source = html.match(/<script>([\s\S]*)<\/script>/)[1];
+class Element {
+  constructor() { this.value = ""; this.listeners = {}; }
+  replaceChildren(...children) { this.children = children; }
+  append(child) { (this.children ||= []).push(child); }
+  addEventListener(name, handler) { this.listeners[name] = handler; }
+}
+const ids = ["service", "configuration", "source", "projection", "source-name",
+  "source-hash", "last-imported-at", "updated-at", "error", "table-state",
+  "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order"];
+const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
+elements["#sort-by"].value = "closed_at";
+elements["#sort-order"].value = "desc";
+let state = "ready";
+let interval;
+let positionFetches = 0;
+let mode = "retry";
+const pending = [];
+let statusMode = "normal";
+const pendingStatuses = [];
+const payload = () => ({state, configuration: "valid", source: "available",
+  projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
+  last_import: state === "ready" ? {source_hash: "same-hash", imported_at: "2026-08-01T00:00:00+00:00"} : null});
+const context = {
+  document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
+  fetch: async (url) => {
+    if (url === "/api/status") {
+      if (statusMode === "race") return new Promise((resolve) => pendingStatuses.push(resolve));
+      return {ok: true, json: async () => payload()};
+    }
+    positionFetches += 1;
+    if (mode === "retry" && positionFetches === 1) return {ok: false, json: async () => ({})};
+    if (mode === "failure") return {ok: false, json: async () => ({})};
+    if (mode === "race") return new Promise((resolve) => pending.push(resolve));
+    return {ok: true, json: async () => ({items: [], total: 0})};
+  },
+  setInterval: (callback) => { interval = callback; return 1; },
+  URLSearchParams, Intl, Date, console,
+};
+vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus;", context);
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+(async () => {
+  await flush(); await flush();
+  await interval();
+  if (positionFetches !== 2) throw new Error(`expected retry after failed load, got ${positionFetches}`);
+  state = "unavailable";
+  await interval();
+  if (elements["#page-summary"].textContent !== "Projeção indisponível.") throw new Error("missing unavailable table state");
+  if (elements["#table-state"].hidden || !elements["#table-state"].textContent.includes("projeção SQLite está indisponível")) throw new Error("missing unavailable error notice");
+  if (!elements["#previous-page"].disabled || !elements["#next-page"].disabled) throw new Error("pagination remains enabled");
+  state = "ready";
+  await interval();
+  if (positionFetches !== 3) throw new Error(`expected recovery fetch, got ${positionFetches}`);
+  if (elements["#table-state"].hidden !== true || elements["#table-state"].textContent !== "") throw new Error("stale unavailable notice");
+  mode = "failure";
+  elements["#sort-by"].listeners.change();
+  await flush();
+  mode = "normal";
+  await interval();
+  if (positionFetches !== 5) throw new Error(`expected retry after active position failure, got ${positionFetches}`);
+  mode = "race";
+  elements["#sort-by"].value = "opened_at";
+  elements["#sort-by"].listeners.change();
+  elements["#sort-by"].value = "status";
+  elements["#sort-by"].listeners.change();
+  if (pending.length !== 2) throw new Error(`expected 2 pending requests, got ${pending.length}`);
+  pending[1]({ok: true, json: async () => ({items: [{position_id: "new", strategy: null, symbol_family: null, direction: "buy", opened_at: null, closed_at: null, status: "open", realized_pnl: null}], total: 1})});
+  await flush();
+  pending[0]({ok: true, json: async () => ({items: [{position_id: "old", strategy: null, symbol_family: null, direction: "buy", opened_at: null, closed_at: null, status: "open", realized_pnl: null}], total: 1})});
+  await flush();
+  if (elements["#positions-body"].children[0].children[0].textContent !== "new") throw new Error("stale response overwrote current table");
+  mode = "normal";
+  statusMode = "race";
+  const olderStatus = context.loadStatus();
+  const newerStatus = context.loadStatus();
+  if (pendingStatuses.length !== 2) throw new Error(`expected 2 pending status requests, got ${pendingStatuses.length}`);
+  pendingStatuses[1]({ok: true, json: async () => ({state: "ready", configuration: "valid", source: "available", projection: "available", source_name: "Report.xlsx", last_import: {source_hash: "new-hash", imported_at: "2026-08-02T00:00:00+00:00"}})});
+  await flush();
+  pendingStatuses[0]({ok: true, json: async () => ({state: "unavailable", configuration: "valid", source: "available", projection: "invalid", source_name: "Report.xlsx", last_import: null})});
+  await Promise.all([olderStatus, newerStatus]);
+  if (elements["#service"].textContent !== "pronto") throw new Error("stale status overwrote current state");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+        node_executable = NODE_EXECUTABLE
+        if node_executable is None:
+            self.skipTest("requires Node.js for JavaScript execution")
+        result = subprocess.run(  # nosec B603 -- absolute executable and fixed test script
+            [node_executable, "-e", runner],
+            check=False,
+            capture_output=True,
+            env={"DASHBOARD_PATH": str(Path(dashboard().path))},
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_fastapi_serves_dashboard_over_http(self) -> None:
         """FastAPI should expose the dashboard at the root endpoint."""

@@ -94,6 +94,7 @@ def append_invalid_numeric_transaction(
     book.save(path)
 
 
+# pylint: disable=too-many-public-methods
 class ImportPipelineTests(unittest.TestCase):
     """Verify parsing, validation, and projection persistence."""
     tmp_path: Path = Path()
@@ -192,6 +193,68 @@ class ImportPipelineTests(unittest.TestCase):
         )
         connection.close()
 
+    def test_refresh_associates_position_with_matching_order_ticket(self) -> None:
+        """A position inherits the strategy of its same-ticket opening order."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "data" / "trades.sqlite"
+        workbook(source, legacy_report=True)
+
+        result = ImportService(config(source)).refresh(database)
+
+        self.assertEqual(result.no_comment_count, 1)
+        connection = sqlite3.connect(database)
+        self.assertEqual(
+            connection.execute(
+                "select strategy from positions where position_id = '1001'"
+            ).fetchone()[0],
+            "FVG",
+        )
+        self.assertIsNone(
+            connection.execute(
+                "select strategy from positions where position_id = '2'"
+            ).fetchone()[0]
+        )
+        connection.close()
+
+    def test_refresh_keeps_position_unassociated_when_ticket_symbol_differs(self) -> None:
+        """A matching ticket cannot override a conflicting raw symbol."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "data" / "trades.sqlite"
+        workbook(source, legacy_report=True)
+        book = load_workbook(source)
+        sheet = book.active
+        if sheet is None:
+            raise RuntimeError("workbook fixture has no active worksheet")
+        sheet["C8"] = "WINV26"
+        book.save(source)
+
+        result = ImportService(config(source)).refresh(database)
+
+        self.assertEqual(result.no_comment_count, 2)
+        connection = sqlite3.connect(database)
+        self.assertIsNone(
+            connection.execute(
+                "select strategy from positions where position_id = '1001'"
+            ).fetchone()[0]
+        )
+        connection.close()
+
+    def test_read_report_preserves_position_metadata_for_unclassified_order(self) -> None:
+        """An unclassified linked order cannot replace position-derived values."""
+        source = self.tmp_path / "history.xlsx"
+        workbook(source, legacy_report=True)
+        book = load_workbook(source)
+        sheet = book.active
+        if sheet is None:
+            raise RuntimeError("workbook fixture has no active worksheet")
+        sheet["L8"] = "manual order"
+        book.save(source)
+
+        positions, _, _, _, _ = read_report(source, config(source))
+
+        self.assertEqual(positions[0].comment, "")
+        self.assertIsNone(positions[0].strategy)
+
 
     def test_configuration_uses_longest_symbol_prefix(self) -> None:
         """Configuration should prefer the most specific symbol prefix."""
@@ -228,6 +291,44 @@ class ImportPipelineTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ConfigurationError, "prefixos vazios"):
+            load_config(path)
+
+
+    def test_configuration_rejects_blank_symbol_family(self) -> None:
+        """A symbol prefix must map to a non-blank analytical family."""
+        path = self.tmp_path / "config.yml"
+        path.write_text(
+            "source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    WIN: '   '\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ConfigurationError, "famílias vazias"):
+            load_config(path)
+
+    def test_configuration_rejects_null_symbol_prefix_or_family(self) -> None:
+        """Null YAML values cannot become the analytical key text 'None'."""
+        for prefixes in ("null: WIN", "WIN: null"):
+            with self.subTest(prefixes=prefixes):
+                path = self.tmp_path / "config.yml"
+                path.write_text(
+                    f"source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    {prefixes}\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(ConfigurationError, "valores nulos"):
+                    load_config(path)
+
+
+    def test_configuration_rejects_blank_strategy_name(self) -> None:
+        """A strategy group must have a non-blank name."""
+        path = self.tmp_path / "config.yml"
+        path.write_text(
+            "source:\n  path: history.xlsx\nstrategies:\n  groups:\n"
+            "    - name: '   '\n      patterns: ['fvg']\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ConfigurationError, "name não vazio"):
             load_config(path)
 
 
