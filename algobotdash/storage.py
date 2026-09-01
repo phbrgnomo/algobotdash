@@ -206,9 +206,10 @@ def _validate_projection(connection: sqlite3.Connection) -> None:
         raise ValueError(f"tabelas ausentes: {sorted(missing_tables)}")
     for table, required_columns in REQUIRED_TABLE_COLUMNS.items():
         columns = {
-            row[1]
+            row[0]
             for row in connection.execute(
-                f"PRAGMA table_info({table})"  # nosec B608 -- constant table allowlist
+                "SELECT name FROM pragma_table_info(?)",
+                (table,),
             )
         }
         if missing_columns := required_columns - columns:
