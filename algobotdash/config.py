@@ -101,9 +101,15 @@ def _symbol_prefixes(raw: dict[Any, Any]) -> tuple[tuple[str, str], ...]:
     symbols = symbols_section.get("prefixes", {})
     if not isinstance(symbols, dict):
         raise ConfigurationError("symbols.prefixes deve ser um mapa")
-    if any(not str(prefix) for prefix in symbols):
+    normalized = tuple(
+        (str(prefix).strip(), str(family).strip())
+        for prefix, family in symbols.items()
+    )
+    if any(not prefix for prefix, _ in normalized):
         raise ConfigurationError("symbols.prefixes não pode conter prefixos vazios")
-    return tuple((str(k), str(v)) for k, v in symbols.items())
+    if any(not family for _, family in normalized):
+        raise ConfigurationError("symbols.prefixes não pode conter famílias vazias")
+    return normalized
 
 
 def _strategy_groups(raw: dict[Any, Any]) -> tuple[StrategyGroup, ...]:
@@ -116,8 +122,11 @@ def _strategy_groups(raw: dict[Any, Any]) -> tuple[StrategyGroup, ...]:
         raise ConfigurationError("strategies.groups deve ser uma sequência")
     groups: list[StrategyGroup] = []
     for item in groups_raw:
-        if not isinstance(item, dict) or not item.get("name") or "patterns" not in item:
+        if not isinstance(item, dict) or "name" not in item or "patterns" not in item:
             raise ConfigurationError("cada grupo precisa de name e patterns")
+        name = item["name"]
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigurationError("cada grupo precisa de name não vazio")
         patterns = item["patterns"]
         if (
             not isinstance(patterns, Sequence)
@@ -132,5 +141,5 @@ def _strategy_groups(raw: dict[Any, Any]) -> tuple[StrategyGroup, ...]:
                 re.compile(pattern)
         except re.error as exc:
             raise ConfigurationError(f"pattern inválido no grupo {item['name']!r}: {exc}") from exc
-        groups.append(StrategyGroup(str(item["name"]), tuple(valid_patterns)))
+        groups.append(StrategyGroup(name.strip(), tuple(valid_patterns)))
     return tuple(groups)

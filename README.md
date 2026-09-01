@@ -45,7 +45,7 @@ poetry install
 poetry run python -m algobotdash --config config.yaml --database data/algobotdash.sqlite
 ```
 
-A atualização escreve uma base temporária e só a publica ao concluir. A projeção contém `imports`, `positions`, `orders`, `transactions` e `rejected_rows`; comentários sem grupo ficam preservados com `strategy` nula. Uma ambiguidade de agrupamento interrompe a atualização e mantém a última projeção válida.
+A atualização escreve uma base temporária e só a publica ao concluir. A projeção contém `imports`, `positions`, `orders`, `transactions` e `rejected_rows`; comentários sem grupo ficam preservados com `strategy` nula. A API mantém grupo e família do símbolo separados para auditoria e expõe a identidade analítica derivada `strategy_key` no formato `WIN FVG`, inclusive no catálogo observado `/api/strategy-keys`. Uma ambiguidade de agrupamento interrompe a atualização e mantém a última projeção válida.
 
 ### Pré-requisitos
 

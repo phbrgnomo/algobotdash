@@ -70,7 +70,7 @@
           <table>
             <thead>
               <tr>
-                <th>ID</th><th>Estratégia</th><th>Símbolo</th><th>Direção</th>
+                <th>ID</th><th>Estratégia analítica</th><th>Símbolo</th><th>Direção</th>
                 <th>Abertura</th><th>Encerramento</th><th>Status</th><th class="numeric">P&amp;L realizado</th>
               </tr>
             </thead>
@@ -129,7 +129,7 @@
         const body = document.querySelector("#positions-body");
         body.replaceChildren(...data.items.map((position) => {
           const row = document.createElement("tr");
-          [position.position_id, position.strategy || "Não associada", position.symbol_family || "—",
+          [position.position_id, position.strategy_key || "Não associada", position.symbol_family || "—",
             position.direction, formatDate(position.opened_at), formatDate(position.closed_at),
             position.status, formatPnl(position.realized_pnl)].forEach((value, index) => {
             const cell = document.createElement("td");

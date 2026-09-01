@@ -180,6 +180,7 @@ def _open_projection(path: Path) -> sqlite3.Connection:
     """Open a compatible projection in read-only mode or raise a stable error."""
     if not path.is_file():
         raise ProjectionUnavailableError("projeção SQLite indisponível")
+    connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
@@ -209,10 +210,8 @@ def _open_projection(path: Path) -> sqlite3.Connection:
             raise ValueError(f"versão de schema SQLite não suportada: {version}")
         return connection
     except (OSError, sqlite3.Error, ValueError) as exc:
-        try:
+        if connection is not None:
             connection.close()
-        except UnboundLocalError:
-            pass
         raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
 
 
@@ -269,7 +268,10 @@ def read_positions(
     column = POSITION_SORT_COLUMNS[sort_by]
     order = sort_order.upper()
     query = (
-        "SELECT position_id, strategy, symbol_family, direction, entry_at AS opened_at, "
+        "SELECT position_id, strategy, symbol_family, "
+        "CASE WHEN strategy IS NOT NULL AND symbol_family IS NOT NULL "
+        "THEN symbol_family || ' ' || strategy END AS strategy_key, "
+        "direction, entry_at AS opened_at, "
         "exit_at AS closed_at, status, "
         "CASE WHEN status = 'open' THEN NULL ELSE pnl END AS realized_pnl "
         "FROM positions "
@@ -285,6 +287,24 @@ def read_positions(
             offset,
         )
         return _normalize_timestamps(rows, "opened_at", "closed_at"), total
+    finally:
+        connection.close()
+
+
+def read_strategy_keys(path: Path) -> list[ProjectionRow]:
+    """Return the symbol-qualified strategy identities present in the projection."""
+    connection = _open_projection(path)
+    try:
+        try:
+            rows = connection.execute(
+                "SELECT symbol_family || ' ' || strategy AS strategy_key, "
+                "strategy, symbol_family "
+                "FROM positions WHERE strategy IS NOT NULL AND symbol_family IS NOT NULL "
+                "GROUP BY symbol_family, strategy ORDER BY symbol_family, strategy"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
+        return [dict(row) for row in rows]
     finally:
         connection.close()
 

@@ -54,6 +54,10 @@ No MVP do algobotdash, ciclos de piramidação não são reconstruídos. A `Posi
 Visão que soma posições classificadas pela configuração de comentários e símbolos, sem afirmar que posições relacionadas formam um ciclo único.
 _Avoid_: ciclo implícito, vínculo de saída inferido
 
+**Identidade analítica da estratégia**:
+Chave derivada pela combinação do símbolo normalizado e do grupo de comentário, como `WIN FVG`. O grupo e a família permanecem disponíveis separadamente para auditoria e filtros.
+_Avoid_: agrupar somente por comentário, misturar a mesma regra entre famílias de símbolos
+
 **Reconciliação global**:
 Conferência entre o P&L consolidado das posições e a soma das transações do relatório, sem usar essa conferência para inventar vínculos por estratégia.
 _Avoid_: atribuição de saída por igualdade de P&L

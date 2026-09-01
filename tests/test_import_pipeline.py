@@ -277,6 +277,31 @@ class ImportPipelineTests(unittest.TestCase):
             load_config(path)
 
 
+    def test_configuration_rejects_blank_symbol_family(self) -> None:
+        """A symbol prefix must map to a non-blank analytical family."""
+        path = self.tmp_path / "config.yml"
+        path.write_text(
+            "source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    WIN: '   '\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ConfigurationError, "famílias vazias"):
+            load_config(path)
+
+
+    def test_configuration_rejects_blank_strategy_name(self) -> None:
+        """A strategy group must have a non-blank name."""
+        path = self.tmp_path / "config.yml"
+        path.write_text(
+            "source:\n  path: history.xlsx\nstrategies:\n  groups:\n"
+            "    - name: '   '\n      patterns: ['fvg']\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ConfigurationError, "name não vazio"):
+            load_config(path)
+
+
     def test_configuration_rejects_non_mapping_root(self) -> None:
         """Configuration should require a mapping at the YAML root."""
         path = self.tmp_path / "config.yml"

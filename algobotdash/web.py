@@ -18,6 +18,7 @@ from .storage import (
     read_imports,
     read_position_orders,
     read_positions,
+    read_strategy_keys,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,6 +189,16 @@ async def strategies_endpoint() -> dict[str, list[dict[str, str]]]:
             detail={"code": "configuration_unavailable"},
         ) from exc
     return {"items": [{"name": group.name} for group in config.strategy_groups]}
+
+
+@app.get("/api/strategy-keys")
+async def strategy_keys_endpoint() -> dict[str, list[dict[str, str]]]:
+    """Return symbol-qualified strategy identities present in the projection."""
+    try:
+        items = read_strategy_keys(DATABASE_PATH)
+    except ProjectionUnavailableError as exc:
+        raise _projection_error(exc) from exc
+    return {"items": items}
 
 
 @app.get("/api/imports")
