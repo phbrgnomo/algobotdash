@@ -16,11 +16,35 @@ ImportHistoryRow: TypeAlias = tuple[int, str, str, str, int, int, int, int]
 ProjectionRow: TypeAlias = dict[str, Any]
 
 POSITION_SORT_COLUMNS = {
-    "opened_at": "datetime(entry_at)",
-    "closed_at": "datetime(exit_at)",
+    "opened_at": "utc_timestamp(entry_at)",
+    "closed_at": "utc_timestamp(exit_at)",
     "realized_pnl": "pnl",
     "symbol_family": "symbol_family",
     "status": "status",
+}
+
+REQUIRED_TABLE_COLUMNS = {
+    "schema_version": {"version"},
+    "imports": {
+        "id", "source_name", "source_hash", "imported_at", "rows_read",
+        "positions_created", "no_comment_count", "rejected_count",
+    },
+    "positions": {
+        "id", "position_id", "strategy", "symbol_family", "symbol_raw", "direction",
+        "entry_at", "exit_at", "status", "volume_requested", "volume_executed",
+        "entry_price", "exit_price", "commission", "swap", "pnl", "import_id",
+    },
+    "orders": {
+        "id", "order_id", "position_id", "strategy", "symbol_raw", "direction",
+        "opened_at", "event_at", "status", "volume_requested", "volume_executed",
+        "price", "stop_loss", "take_profit", "comment", "import_id",
+    },
+    "transactions": {
+        "id", "transaction_id", "order_id", "position_id", "strategy", "at",
+        "symbol_raw", "direction", "volume", "price", "commission", "tax", "swap",
+        "pnl", "balance", "comment", "import_id",
+    },
+    "rejected_rows": {"id", "import_id", "row_number", "position_id", "reason"},
 }
 
 
@@ -159,15 +183,26 @@ def _open_projection(path: Path) -> sqlite3.Connection:
     try:
         connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
+        connection.create_function(
+            "utc_timestamp", 1, _utc_timestamp, deterministic=True
+        )
         tables = {
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-        required_tables = {"schema_version", "imports", "positions", "orders"}
+        required_tables = set(REQUIRED_TABLE_COLUMNS)
         if missing_tables := required_tables - tables:
             raise ValueError(f"tabelas ausentes: {sorted(missing_tables)}")
+        for table, required_columns in REQUIRED_TABLE_COLUMNS.items():
+            columns = {
+                row[1] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            if missing_columns := required_columns - columns:
+                raise ValueError(
+                    f"colunas ausentes em {table}: {sorted(missing_columns)}"
+                )
         version_row = connection.execute("SELECT version FROM schema_version").fetchone()
         version = version_row[0] if version_row else None
         if version != CURRENT_SCHEMA_VERSION:

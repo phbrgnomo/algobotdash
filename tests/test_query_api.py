@@ -201,7 +201,8 @@ class QueryApiTests(unittest.TestCase):
         """Reject a database that lacks a table required by query endpoints."""
         connection = sqlite3.connect(self.database_path)
         connection.executescript(SCHEMA)
-        connection.execute("DROP TABLE orders")
+        connection.execute("DROP TABLE transactions")
+        connection.execute("CREATE TABLE transactions (id INTEGER PRIMARY KEY)")
         connection.commit()
         connection.close()
 
@@ -210,3 +211,40 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json()["state"], "unavailable")
         self.assertEqual(status.json()["projection"], "invalid")
+
+    def test_positions_sort_subsecond_timestamps_chronologically(self) -> None:
+        """Keep timestamp ordering precise below whole-second resolution."""
+        connection = sqlite3.connect(self.database_path)
+        connection.executescript(SCHEMA)
+        connection.execute(
+            "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+        )
+        connection.executemany(
+            "INSERT INTO positions("
+            "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
+            "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
+            "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "a-later", None, None, "WINQ26", "buy",
+                    "2026-08-01T10:00:00.000400-03:00", None, "open", None, None,
+                    None, None, 0, 0, 0, 1,
+                ),
+                (
+                    "z-earlier", None, None, "WINQ26", "buy",
+                    "2026-08-01T10:00:00.000100-03:00", None, "open", None, None,
+                    None, None, 0, 0, 0, 1,
+                ),
+            ],
+        )
+        connection.commit()
+        connection.close()
+
+        response = self._request("/api/positions?sort_by=opened_at&sort_order=asc")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["position_id"] for item in response.json()["items"]],
+            ["z-earlier", "a-later"],
+        )

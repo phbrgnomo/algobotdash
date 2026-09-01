@@ -183,6 +183,7 @@
             renderPositions({items: [], total: 0});
           }
           if (data.state === "unavailable") {
+            latestImportKey = null;
             document.querySelector("#positions-body").replaceChildren();
             document.querySelector("#page-summary").textContent = "Projeção indisponível.";
             document.querySelector("#previous-page").disabled = true;

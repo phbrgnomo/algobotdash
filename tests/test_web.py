@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,6 +82,63 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="previous-page"', content)
         self.assertIn('id="next-page"', content)
         self.assertIn("Projeção indisponível.", content)
+
+    @unittest.skipUnless(shutil.which("node"), "requires Node.js for JavaScript execution")
+    def test_dashboard_recovers_positions_when_projection_returns_with_same_hash(self) -> None:
+        """Reload positions after unavailable state even when source hash is unchanged."""
+        runner = r"""
+const fs = require("fs");
+const vm = require("vm");
+const html = fs.readFileSync(process.env.DASHBOARD_PATH, "utf8");
+const source = html.match(/<script>([\s\S]*)<\/script>/)[1];
+class Element {
+  constructor() { this.value = ""; this.listeners = {}; }
+  replaceChildren(...children) { this.children = children; }
+  append(child) { (this.children ||= []).push(child); }
+  addEventListener(name, handler) { this.listeners[name] = handler; }
+}
+const ids = ["service", "configuration", "source", "projection", "source-name",
+  "source-hash", "last-imported-at", "updated-at", "error", "table-state",
+  "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order"];
+const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
+elements["#sort-by"].value = "closed_at";
+elements["#sort-order"].value = "desc";
+let state = "ready";
+let interval;
+let positionFetches = 0;
+const payload = () => ({state, configuration: "valid", source: "available",
+  projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
+  last_import: state === "ready" ? {source_hash: "same-hash", imported_at: "2026-08-01T00:00:00+00:00"} : null});
+const context = {
+  document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
+  fetch: async (url) => {
+    if (url === "/api/status") return {ok: true, json: async () => payload()};
+    positionFetches += 1;
+    return {ok: true, json: async () => ({items: [], total: 0})};
+  },
+  setInterval: (callback) => { interval = callback; return 1; },
+  URLSearchParams, Intl, Date, console,
+};
+vm.runInNewContext(source, context);
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+(async () => {
+  await flush(); await flush();
+  state = "unavailable";
+  await interval();
+  state = "ready";
+  await interval();
+  if (positionFetches !== 2) throw new Error(`expected 2 position fetches, got ${positionFetches}`);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+        result = subprocess.run(
+            ["node", "-e", runner],
+            check=False,
+            capture_output=True,
+            env={**os.environ, "DASHBOARD_PATH": str(Path(dashboard().path))},
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_fastapi_serves_dashboard_over_http(self) -> None:
         """FastAPI should expose the dashboard at the root endpoint."""
