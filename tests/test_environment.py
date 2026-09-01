@@ -40,6 +40,18 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(environment["ALGOBOTDASH_DATABASE"], "data/local.sqlite")
         self.assertEqual(environment["QUOTED_VALUE"], "value with spaces")
 
+    def test_existing_process_value_skips_invalid_file_value(self) -> None:
+        """A process value takes precedence without parsing its file fallback."""
+        with tempfile.TemporaryDirectory(prefix="algobotdash-env-tests-") as raw_dir:
+            path = Path(raw_dir) / ".env"
+            _ = path.write_text('ALGOBOTDASH_CONFIG="unterminated\n', encoding="utf-8")
+            environment = {"ALGOBOTDASH_CONFIG": "process-config.yaml"}
+
+            loaded = load_environment(path, environ=environment)
+
+        self.assertEqual(loaded, path)
+        self.assertEqual(environment["ALGOBOTDASH_CONFIG"], "process-config.yaml")
+
     def test_missing_file_is_optional(self) -> None:
         """Installed runtimes may rely entirely on process environment variables."""
         environment: dict[str, str] = {}

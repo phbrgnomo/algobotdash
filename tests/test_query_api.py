@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 import sqlite3
 import tempfile
@@ -12,10 +11,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-import httpx
-
 from algobotdash.storage import CURRENT_SCHEMA_VERSION, SCHEMA, read_positions
 from algobotdash.web import app
+from tests.fixture_helpers import get_asgi, insert_positions
 
 
 class QueryApiTests(unittest.TestCase):
@@ -51,16 +49,9 @@ class QueryApiTests(unittest.TestCase):
             DATABASE_PATH=self.database_path,
         )
 
-    def _request(self, path: str) -> httpx.Response:
-        async def request() -> httpx.Response:
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver"
-            ) as client:
-                return await client.get(path)
-
+    def _request(self, path: str):
         with self._paths():
-            return asyncio.run(request())
+            return get_asgi(app, path)
 
     @contextmanager
     def _projection(self) -> Iterator[sqlite3.Connection]:
@@ -85,11 +76,8 @@ class QueryApiTests(unittest.TestCase):
                     ),
                 ],
             )
-            connection.executemany(
-                "INSERT INTO positions("
-                "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
-                "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
-                "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            insert_positions(
+                connection,
                 [
                     (
                         "100", "Turtle", "WIN", "WINQ26", "buy", "2026-08-01T10:00:00-03:00",

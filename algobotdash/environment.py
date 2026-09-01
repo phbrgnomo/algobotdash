@@ -45,10 +45,9 @@ def load_environment(
             raise EnvironmentFileError(
                 f"entrada inválida em {environment_path}:{line_number}"
             )
-        _ = target.setdefault(
-            key,
-            _environment_value(raw_value.strip(), environment_path, line_number),
-        )
+        if key in target:
+            continue
+        target[key] = _environment_value(raw_value.strip(), environment_path, line_number)
     return environment_path
 
 

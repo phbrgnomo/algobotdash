@@ -89,6 +89,7 @@
       const sortOrder = document.querySelector("#sort-order");
       let latestImportKey = null;
       let positionRequestGeneration = 0;
+      let statusRequestGeneration = 0;
 
       function label(value) {
         return {valid: "válida", invalid: "inválida", available: "disponível",
@@ -168,15 +169,18 @@
           setNotice("#table-state", `Atenção: não foi possível consultar posições (${error.message}).`, true);
           document.querySelector("#previous-page").disabled = true;
           document.querySelector("#next-page").disabled = true;
+          latestImportKey = null;
           return false;
         }
       }
 
       async function loadStatus() {
+        const requestGeneration = ++statusRequestGeneration;
         try {
           const response = await fetch("/api/status", {cache: "no-store"});
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const data = await response.json();
+          if (requestGeneration !== statusRequestGeneration) return;
           renderStatus(data);
           setNotice("#error", "", false);
           const importKey = data.last_import?.source_hash || null;
@@ -197,6 +201,7 @@
             setNotice("#table-state", "Atenção: a projeção SQLite está indisponível.", true);
           }
         } catch (error) {
+          if (requestGeneration !== statusRequestGeneration) return;
           setNotice("#error", `Atenção: não foi possível atualizar o estado (${error.message}).`, true);
         }
       }

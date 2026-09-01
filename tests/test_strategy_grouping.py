@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 import sqlite3
 import tempfile
@@ -10,10 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import httpx
-
 from algobotdash.storage import SCHEMA
 from algobotdash.web import app, dashboard
+from tests.fixture_helpers import get_asgi, insert_positions
 
 
 class StrategyGroupingTests(unittest.TestCase):
@@ -34,20 +32,13 @@ class StrategyGroupingTests(unittest.TestCase):
         )
         self.addCleanup(shutil.rmtree, self.tmp_path)
 
-    def _request(self, path: str) -> httpx.Response:
-        async def request() -> httpx.Response:
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://testserver"
-            ) as client:
-                return await client.get(path)
-
+    def _request(self, path: str):
         with patch.multiple(
             "algobotdash.web",
             CONFIG_PATH=self.config_path,
             DATABASE_PATH=self.database_path,
         ):
-            return asyncio.run(request())
+            return get_asgi(app, path)
 
     def _seed_projection(self) -> None:
         connection = sqlite3.connect(self.database_path)
@@ -56,11 +47,8 @@ class StrategyGroupingTests(unittest.TestCase):
             "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 3, 3, 1, 0),
         )
-        connection.executemany(
-            "INSERT INTO positions("
-            "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
-            "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
-            "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        insert_positions(
+            connection,
             [
                 (
                     "win", "FVG", "WIN", "WINQ26", "buy", "2026-08-01T10:00:00+00:00",

@@ -109,22 +109,28 @@ let interval;
 let positionFetches = 0;
 let mode = "retry";
 const pending = [];
+let statusMode = "normal";
+const pendingStatuses = [];
 const payload = () => ({state, configuration: "valid", source: "available",
   projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
   last_import: state === "ready" ? {source_hash: "same-hash", imported_at: "2026-08-01T00:00:00+00:00"} : null});
 const context = {
   document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
   fetch: async (url) => {
-    if (url === "/api/status") return {ok: true, json: async () => payload()};
+    if (url === "/api/status") {
+      if (statusMode === "race") return new Promise((resolve) => pendingStatuses.push(resolve));
+      return {ok: true, json: async () => payload()};
+    }
     positionFetches += 1;
     if (mode === "retry" && positionFetches === 1) return {ok: false, json: async () => ({})};
+    if (mode === "failure") return {ok: false, json: async () => ({})};
     if (mode === "race") return new Promise((resolve) => pending.push(resolve));
     return {ok: true, json: async () => ({items: [], total: 0})};
   },
   setInterval: (callback) => { interval = callback; return 1; },
   URLSearchParams, Intl, Date, console,
 };
-vm.runInNewContext(source, context);
+vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 (async () => {
   await flush(); await flush();
@@ -139,6 +145,12 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await interval();
   if (positionFetches !== 3) throw new Error(`expected recovery fetch, got ${positionFetches}`);
   if (elements["#table-state"].hidden !== true || elements["#table-state"].textContent !== "") throw new Error("stale unavailable notice");
+  mode = "failure";
+  elements["#sort-by"].listeners.change();
+  await flush();
+  mode = "normal";
+  await interval();
+  if (positionFetches !== 5) throw new Error(`expected retry after active position failure, got ${positionFetches}`);
   mode = "race";
   elements["#sort-by"].value = "opened_at";
   elements["#sort-by"].listeners.change();
@@ -150,6 +162,16 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   pending[0]({ok: true, json: async () => ({items: [{position_id: "old", strategy: null, symbol_family: null, direction: "buy", opened_at: null, closed_at: null, status: "open", realized_pnl: null}], total: 1})});
   await flush();
   if (elements["#positions-body"].children[0].children[0].textContent !== "new") throw new Error("stale response overwrote current table");
+  mode = "normal";
+  statusMode = "race";
+  const olderStatus = context.loadStatus();
+  const newerStatus = context.loadStatus();
+  if (pendingStatuses.length !== 2) throw new Error(`expected 2 pending status requests, got ${pendingStatuses.length}`);
+  pendingStatuses[1]({ok: true, json: async () => ({state: "ready", configuration: "valid", source: "available", projection: "available", source_name: "Report.xlsx", last_import: {source_hash: "new-hash", imported_at: "2026-08-02T00:00:00+00:00"}})});
+  await flush();
+  pendingStatuses[0]({ok: true, json: async () => ({state: "unavailable", configuration: "valid", source: "available", projection: "invalid", source_name: "Report.xlsx", last_import: null})});
+  await Promise.all([olderStatus, newerStatus]);
+  if (elements["#service"].textContent !== "pronto") throw new Error("stale status overwrote current state");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
         node_executable = NODE_EXECUTABLE
