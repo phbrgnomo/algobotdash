@@ -20,9 +20,14 @@ Não será inferida associação de saída por horário, volume ou proximidade t
 
 O desenho futuro poderá agrupar posições de uma entrada-base e suas piramidações como um único ciclo quando houver evidência suficiente. No MVP, essa associação não será feita: cada `Position` será a unidade analítica, com agregação por estratégia e símbolo. As posições, ordens e transações permanecerão como detalhes independentes; a reconstrução de ciclos fica para uma evolução posterior.
 
-A configuração de estratégia continuará declarando padrões de comentários, mas não será usada para afirmar uma linhagem de ciclo no MVP.
+Quando o ticket de uma posição for igual ao ticket de uma ordem e o símbolo bruto também
+coincidir, a posição herdará a estratégia classificada pelo comentário dessa ordem. Esse
+vínculo explícito classifica a posição, mas não afirma uma linhagem de ciclo.
 
-No MVP, posições sem um vínculo explícito com uma ordem, ou com símbolo não normalizado, continuarão preservadas, mas ficarão fora das agregações normalizadas. O P&L por posição será obtido do resumo de posições; comentários e estratégias serão atribuídos às ordens e às transações que referenciam explicitamente essas ordens, sem projetar esse vínculo para posições.
+No MVP, posições sem esse vínculo explícito, com símbolo divergente ou com comentário não
+classificado continuarão preservadas, mas ficarão fora das agregações normalizadas. O P&L
+por posição será obtido do resumo de posições; ordens e transações continuam preservadas
+separadamente para auditoria.
 
 ## Consequences
 

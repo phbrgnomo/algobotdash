@@ -192,6 +192,52 @@ class ImportPipelineTests(unittest.TestCase):
         )
         connection.close()
 
+    def test_refresh_associates_position_with_matching_order_ticket(self) -> None:
+        """A position inherits the strategy of its same-ticket opening order."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "data" / "trades.sqlite"
+        workbook(source, legacy_report=True)
+
+        result = ImportService(config(source)).refresh(database)
+
+        self.assertEqual(result.no_comment_count, 1)
+        connection = sqlite3.connect(database)
+        self.assertEqual(
+            connection.execute(
+                "select strategy from positions where position_id = '1001'"
+            ).fetchone()[0],
+            "FVG",
+        )
+        self.assertIsNone(
+            connection.execute(
+                "select strategy from positions where position_id = '2'"
+            ).fetchone()[0]
+        )
+        connection.close()
+
+    def test_refresh_keeps_position_unassociated_when_ticket_symbol_differs(self) -> None:
+        """A matching ticket cannot override a conflicting raw symbol."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "data" / "trades.sqlite"
+        workbook(source, legacy_report=True)
+        book = load_workbook(source)
+        sheet = book.active
+        if sheet is None:
+            raise RuntimeError("workbook fixture has no active worksheet")
+        sheet["C8"] = "WINV26"
+        book.save(source)
+
+        result = ImportService(config(source)).refresh(database)
+
+        self.assertEqual(result.no_comment_count, 2)
+        connection = sqlite3.connect(database)
+        self.assertIsNone(
+            connection.execute(
+                "select strategy from positions where position_id = '1001'"
+            ).fetchone()[0]
+        )
+        connection.close()
+
 
     def test_configuration_uses_longest_symbol_prefix(self) -> None:
         """Configuration should prefer the most specific symbol prefix."""
