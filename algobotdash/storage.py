@@ -161,11 +161,8 @@ def read_import_history(path: Path) -> list[ImportHistoryRow]:
             raise ValueError(f"schema SQLite incompatível: tabela imports ausente em {path}")
         if "schema_version" not in tables:
             raise ValueError(f"schema SQLite incompatível em {path}: tabela schema_version ausente")
-        version_row = connection.execute("SELECT version FROM schema_version").fetchone()
-        version = version_row[0] if version_row else None
+        _validate_schema_version(connection)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(imports)")}
-        if version != CURRENT_SCHEMA_VERSION:
-            raise ValueError(f"versão de schema SQLite não suportada: {version}")
         if "positions_created" in columns:
             return connection.execute(
                 "SELECT id, source_name, source_hash, imported_at, rows_read, "
@@ -218,10 +215,14 @@ def _validate_projection(connection: sqlite3.Connection) -> None:
             raise ValueError(
                 f"colunas ausentes em {table}: {sorted(missing_columns)}"
             )
-    version_row = connection.execute("SELECT version FROM schema_version").fetchone()
-    version = version_row[0] if version_row else None
-    if version != CURRENT_SCHEMA_VERSION:
-        raise ValueError(f"versão de schema SQLite não suportada: {version}")
+    _validate_schema_version(connection)
+
+
+def _validate_schema_version(connection: sqlite3.Connection) -> None:
+    """Require exactly one supported schema-version row."""
+    versions = [row[0] for row in connection.execute("SELECT version FROM schema_version")]
+    if versions != [CURRENT_SCHEMA_VERSION]:
+        raise ValueError(f"versão de schema SQLite não suportada: {versions}")
 
 
 def _page_rows(

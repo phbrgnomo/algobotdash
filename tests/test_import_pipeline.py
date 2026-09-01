@@ -94,6 +94,7 @@ def append_invalid_numeric_transaction(
     book.save(path)
 
 
+# pylint: disable=too-many-public-methods
 class ImportPipelineTests(unittest.TestCase):
     """Verify parsing, validation, and projection persistence."""
     tmp_path: Path = Path()
@@ -238,6 +239,22 @@ class ImportPipelineTests(unittest.TestCase):
         )
         connection.close()
 
+    def test_read_report_preserves_position_metadata_for_unclassified_order(self) -> None:
+        """An unclassified linked order cannot replace position-derived values."""
+        source = self.tmp_path / "history.xlsx"
+        workbook(source, legacy_report=True)
+        book = load_workbook(source)
+        sheet = book.active
+        if sheet is None:
+            raise RuntimeError("workbook fixture has no active worksheet")
+        sheet["L8"] = "manual order"
+        book.save(source)
+
+        positions, _, _, _, _ = read_report(source, config(source))
+
+        self.assertEqual(positions[0].comment, "")
+        self.assertIsNone(positions[0].strategy)
+
 
     def test_configuration_uses_longest_symbol_prefix(self) -> None:
         """Configuration should prefer the most specific symbol prefix."""
@@ -287,6 +304,19 @@ class ImportPipelineTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ConfigurationError, "famílias vazias"):
             load_config(path)
+
+    def test_configuration_rejects_null_symbol_prefix_or_family(self) -> None:
+        """Null YAML values cannot become the analytical key text 'None'."""
+        for prefixes in ("null: WIN", "WIN: null"):
+            with self.subTest(prefixes=prefixes):
+                path = self.tmp_path / "config.yml"
+                path.write_text(
+                    f"source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    {prefixes}\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(ConfigurationError, "valores nulos"):
+                    load_config(path)
 
 
     def test_configuration_rejects_blank_strategy_name(self) -> None:

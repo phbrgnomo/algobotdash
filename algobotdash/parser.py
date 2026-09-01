@@ -342,7 +342,11 @@ def _associate_position_strategies(
     associated: list[PositionRecord] = []
     for position in positions:
         order = orders_by_ticket.get(position.position_id)
-        if order is None or order.symbol_raw != position.symbol_raw:
+        if (
+            order is None
+            or order.symbol_raw != position.symbol_raw
+            or order.strategy is None
+        ):
             associated.append(position)
             continue
         associated.append(replace(position, comment=order.comment, strategy=order.strategy))

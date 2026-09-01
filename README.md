@@ -38,13 +38,14 @@ Enquanto o dashboard está sendo implementado, o relatório existente pode ser g
 
 ### Importação para SQLite
 
-O primeiro slice da Issue #2 reconstrói uma projeção SQLite a partir das seções `Posições`, `Ordens` e `Transações` do relatório. Copie `config.example.yaml` para `config/config.yaml`, ajuste o caminho da fonte e execute:
+O primeiro slice da Issue #2 reconstrói uma projeção SQLite a partir das seções `Posições`, `Ordens` e `Transações` do relatório. Prepare a configuração local e execute:
 
 ```bash
 mkdir -p config
 cp config.example.yaml config/config.yaml
+cp .env.example .env
 poetry install
-poetry run python -m algobotdash --config config/config.yaml --database data/algobotdash.sqlite
+poetry run python -m algobotdash
 ```
 
 A atualização escreve uma base temporária e só a publica ao concluir. A projeção contém `imports`, `positions`, `orders`, `transactions` e `rejected_rows`; comentários sem grupo ficam preservados com `strategy` nula. A API mantém grupo e família do símbolo separados para auditoria e expõe a identidade analítica derivada `strategy_key` no formato `WIN FVG`, inclusive no catálogo observado `/api/strategy-keys`. Uma ambiguidade de agrupamento interrompe a atualização e mantém a última projeção válida.
@@ -56,7 +57,7 @@ A atualização escreve uma base temporária e só a publica ao concluir. A proj
 
 ### Execução
 
-Coloque o arquivo `ReportHistory-2002705608.xlsx` na raiz do projeto e execute:
+Coloque o workbook no caminho definido por `source.path` em `config/config.yaml` e execute:
 
 ```bash
 poetry run python generate_trade_report.py
@@ -88,32 +89,31 @@ O container roda sem privilégios de root. Prepare os diretórios, a configuraç
 ```bash
 mkdir -p config source data reports
 cp config.example.yaml config/config.yaml
+cp .env.example .env
 cp /caminho/para/ReportHistory.xlsx source/ReportHistory.xlsx
-export ALGOBOTDASH_UID="$(id -u)"
-export ALGOBOTDASH_GID="$(id -g)"
+sed -i "s/^ALGOBOTDASH_UID=.*/ALGOBOTDASH_UID=$(id -u)/" .env
+sed -i "s/^ALGOBOTDASH_GID=.*/ALGOBOTDASH_GID=$(id -g)/" .env
 docker compose up -d
 ```
 
-Abra `http://localhost:8765/`. A porta do host pode ser alterada com `ALGOBOTDASH_PORT`, por exemplo `ALGOBOTDASH_PORT=9000 docker compose up -d`.
+Abra `http://localhost:8765/`. Para alterar a porta do host, edite `ALGOBOTDASH_PORT` no `.env` antes de iniciar o Compose.
 
 O serviço não importa o workbook automaticamente. Para criar ou reconstruir a projeção no volume `data/`, execute:
 
 ```bash
 docker compose run --rm algobotdash \
-  python -m algobotdash \
-  --config /app/config/config.yaml \
-  --database /app/data/algobotdash.sqlite
+  python -m algobotdash
 ```
 
 A execução direta via Poetry é o fallback de desenvolvimento:
 
 ```bash
-ALGOBOTDASH_CONFIG=config/config.yaml \
-ALGOBOTDASH_DATABASE=data/algobotdash.sqlite \
 poetry run uvicorn algobotdash.web:app --host 127.0.0.1 --port 8765
 ```
 
-`ALGOBOTDASH_CONFIG` e `ALGOBOTDASH_DATABASE` também podem ser usados para apontar o serviço a outros arquivos locais. No Compose, eles são definidos automaticamente para os caminhos montados em `/app`. `ALGOBOTDASH_UID` e `ALGOBOTDASH_GID` fazem o processo no container gravar `data/` e `reports/` como o usuário do host; deixe ambos definidos para evitar arquivos inacessíveis depois da importação.
+`.env.example` documenta as variáveis locais opcionais; copie-o para `.env`, que não é versionado, quando quiser personalizá-las. `ALGOBOTDASH_CONFIG` e `ALGOBOTDASH_DATABASE` usam caminhos relativos válidos tanto na raiz do projeto quanto em `/app`. O Compose usa valores padrão para ambos e consulta `.env` apenas para interpolar sua configuração; a CLI, o backend e `generate_trade_report.py` carregam o arquivo diretamente quando ele existe. Valores já definidos no processo têm precedência sobre `.env`, e argumentos `--config`/`--database` têm precedência final na importação.
+
+`ALGOBOTDASH_UID` e `ALGOBOTDASH_GID` fazem o processo no container gravar `data/` e `reports/` como o usuário do host; ajuste ambos para evitar arquivos inacessíveis depois da importação.
 
 O dashboard inicial é uma página própria de estado operacional. Ele não serve nem reutiliza o HTML legado produzido por `generate_trade_report.py`; `reports/` permanece reservado para exportações futuras.
 

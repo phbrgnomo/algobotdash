@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import ConfigurationError, load_config
+from .environment import load_environment
 from .storage import (
     ProjectionUnavailableError,
     read_import_history,
@@ -22,6 +23,8 @@ from .storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ = load_environment()
 
 APP_VERSION = "0.1.0"
 CONFIG_PATH = Path(os.getenv("ALGOBOTDASH_CONFIG", "config/config.yaml"))

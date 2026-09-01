@@ -101,6 +101,8 @@ def _symbol_prefixes(raw: dict[Any, Any]) -> tuple[tuple[str, str], ...]:
     symbols = symbols_section.get("prefixes", {})
     if not isinstance(symbols, dict):
         raise ConfigurationError("symbols.prefixes deve ser um mapa")
+    if any(prefix is None or family is None for prefix, family in symbols.items()):
+        raise ConfigurationError("symbols.prefixes não pode conter valores nulos")
     normalized = tuple(
         (str(prefix).strip(), str(family).strip())
         for prefix, family in symbols.items()

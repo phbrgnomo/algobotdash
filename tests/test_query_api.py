@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import httpx
 
-from algobotdash.storage import SCHEMA, read_positions
+from algobotdash.storage import CURRENT_SCHEMA_VERSION, SCHEMA, read_positions
 from algobotdash.web import app
 
 
@@ -240,6 +240,24 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json()["state"], "unavailable")
         self.assertEqual(status.json()["projection"], "invalid")
+
+    def test_positions_reject_duplicate_schema_version_rows(self) -> None:
+        """Reject projections whose schema version has more than one row."""
+        connection = sqlite3.connect(self.database_path)
+        connection.executescript(SCHEMA)
+        connection.execute("DROP TABLE schema_version")
+        connection.execute("CREATE TABLE schema_version (version INTEGER)")
+        connection.executemany(
+            "INSERT INTO schema_version(version) VALUES (?)",
+            [(CURRENT_SCHEMA_VERSION,), (CURRENT_SCHEMA_VERSION,)],
+        )
+        connection.commit()
+        connection.close()
+
+        response = self._request("/api/positions")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["code"], "projection_unavailable")
 
     def test_positions_sort_subsecond_timestamps_chronologically(self) -> None:
         """Keep timestamp ordering precise below whole-second resolution."""

@@ -153,10 +153,6 @@ class DockerRuntimeTests(unittest.TestCase):
             "python",
             "-m",
             "algobotdash",
-            "--config",
-            "/app/config/config.yaml",
-            "--database",
-            "/app/data/algobotdash.sqlite",
         )
         self.assertEqual(imported.returncode, 0, imported.stderr)
         database_path = self.tmp_path / "data" / "algobotdash.sqlite"
