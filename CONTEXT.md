@@ -74,6 +74,10 @@ _Avoid_: capital informado manualmente, saldo após incorporar operações do di
 Unidade de análise do MVP, identificada pelo registro de posição; é classificada pela ordem correspondente quando `position_id` e `symbol_raw` coincidem e a ordem possui uma estratégia. Ciclos de piramidação não são inferidos nesta versão.
 _Avoid_: ciclo implícito, agrupamento por proximidade
 
+**Associação de posição**:
+Vínculo comprovado quando `position_id` e `symbol_raw` coincidem com o ticket e o símbolo bruto de uma ordem. A associação pode existir sem estratégia classificada; `strategy` nula não significa, sozinha, posição não associada.
+_Avoid_: inferir associação pela presença ou ausência de estratégia
+
 **Ordem**:
 Registro individual de intenção/estado do relatório, preservado como detalhe de rastreabilidade da posição quando houver vínculo explícito.
 _Avoid_: trade completo

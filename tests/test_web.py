@@ -78,7 +78,15 @@ class WebTests(unittest.TestCase):
         content = Path(page).read_text(encoding="utf-8")
 
         self.assertIn('fetch("/api/status"', content)
+        self.assertIn('fetch("/api/filter-options"', content)
         self.assertIn("/api/positions?${query}", content)
+        self.assertIn('id="filter-strategy"', content)
+        self.assertIn('id="filter-symbol-family"', content)
+        self.assertIn('id="filter-direction"', content)
+        self.assertIn('id="filter-status"', content)
+        self.assertIn('id="filter-association"', content)
+        self.assertIn('id="date-from"', content)
+        self.assertIn('id="date-to"', content)
         self.assertIn('id="positions-body"', content)
         self.assertIn('id="previous-page"', content)
         self.assertIn('id="next-page"', content)
@@ -99,14 +107,22 @@ class Element {
   addEventListener(name, handler) { this.listeners[name] = handler; }
 }
 const ids = ["service", "configuration", "source", "projection", "source-name",
-  "source-hash", "last-imported-at", "updated-at", "error", "table-state",
-  "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order"];
+  "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
+  "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
+  "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
+  "filter-association", "date-from", "date-to"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
+elements["#filter-status"].value = "closed";
+elements["#filter-association"].value = "all";
 let state = "ready";
 let interval;
 let positionFetches = 0;
+let filterFetches = 0;
+let filterPayload = {strategies: ["FVG", "Turtle"], symbol_families: ["WDO", "WIN"]};
+let filterMode = "normal";
+let lastPositionUrl = "";
 let mode = "retry";
 const pending = [];
 let statusMode = "normal";
@@ -121,7 +137,13 @@ const context = {
       if (statusMode === "race") return new Promise((resolve) => pendingStatuses.push(resolve));
       return {ok: true, json: async () => payload()};
     }
+    if (url === "/api/filter-options") {
+      filterFetches += 1;
+      if (filterMode === "failure") return {ok: false, json: async () => ({})};
+      return {ok: true, json: async () => filterPayload};
+    }
     positionFetches += 1;
+    lastPositionUrl = url;
     if (mode === "retry" && positionFetches === 1) return {ok: false, json: async () => ({})};
     if (mode === "failure") return {ok: false, json: async () => ({})};
     if (mode === "race") return new Promise((resolve) => pending.push(resolve));
@@ -134,6 +156,8 @@ vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 (async () => {
   await flush(); await flush();
+  if (filterFetches !== 1) throw new Error(`expected initial filter catalog, got ${filterFetches}`);
+  if (!lastPositionUrl.includes("status=closed")) throw new Error(`missing default closed filter: ${lastPositionUrl}`);
   await interval();
   if (positionFetches !== 2) throw new Error(`expected retry after failed load, got ${positionFetches}`);
   state = "unavailable";
@@ -142,15 +166,33 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   if (elements["#table-state"].hidden || !elements["#table-state"].textContent.includes("projeção SQLite está indisponível")) throw new Error("missing unavailable error notice");
   if (!elements["#previous-page"].disabled || !elements["#next-page"].disabled) throw new Error("pagination remains enabled");
   state = "ready";
+  filterMode = "failure";
   await interval();
   if (positionFetches !== 3) throw new Error(`expected recovery fetch, got ${positionFetches}`);
+  filterMode = "normal";
+  await interval();
+  if (filterFetches !== 3) throw new Error(`expected filter retry, got ${filterFetches}`);
+  if (positionFetches !== 4) throw new Error(`expected reload after filter recovery, got ${positionFetches}`);
+  elements["#filter-strategy"].value = "FVG";
+  elements["#filter-symbol-family"].value = "WIN";
+  elements["#filter-direction"].value = "buy";
+  elements["#filter-association"].value = "associated";
+  elements["#date-from"].value = "2026-08-01";
+  elements["#date-to"].value = "2026-08-31";
+  elements["#filter-strategy"].listeners.change();
+  await flush();
+  for (const token of ["strategy=FVG", "symbol_family=WIN", "direction=buy",
+    "association=associated", "date_from=2026-08-01", "date_to=2026-08-31"]) {
+    if (!lastPositionUrl.includes(token)) throw new Error(`missing filter ${token}: ${lastPositionUrl}`);
+  }
   if (elements["#table-state"].hidden !== true || elements["#table-state"].textContent !== "") throw new Error("stale unavailable notice");
   mode = "failure";
   elements["#sort-by"].listeners.change();
   await flush();
   mode = "normal";
   await interval();
-  if (positionFetches !== 5) throw new Error(`expected retry after active position failure, got ${positionFetches}`);
+  if (positionFetches !== 7) throw new Error(`expected retry after active position failure, got ${positionFetches}`);
+  if (elements["#filter-strategy"].value !== "FVG") throw new Error("valid strategy selection was lost");
   mode = "race";
   elements["#sort-by"].value = "opened_at";
   elements["#sort-by"].listeners.change();
@@ -164,6 +206,8 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   if (elements["#positions-body"].children[0].children[0].textContent !== "new") throw new Error("stale response overwrote current table");
   mode = "normal";
   statusMode = "race";
+  elements["#filter-strategy"].value = "Gone";
+  filterPayload = {strategies: ["Turtle"], symbol_families: ["WIN"]};
   const olderStatus = context.loadStatus();
   const newerStatus = context.loadStatus();
   if (pendingStatuses.length !== 2) throw new Error(`expected 2 pending status requests, got ${pendingStatuses.length}`);
@@ -172,6 +216,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   pendingStatuses[0]({ok: true, json: async () => ({state: "unavailable", configuration: "valid", source: "available", projection: "invalid", source_name: "Report.xlsx", last_import: null})});
   await Promise.all([olderStatus, newerStatus]);
   if (elements["#service"].textContent !== "pronto") throw new Error("stale status overwrote current state");
+  if (elements["#filter-strategy"].value !== "") throw new Error("removed strategy selection was preserved");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
         node_executable = NODE_EXECUTABLE
@@ -275,6 +320,22 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
         self._write_config()
         database_path = self.data_dir / "algobotdash.sqlite"
         database_path.write_bytes(b"projection")
+
+        payload = self._health_payload()
+
+        self.assertEqual(payload["projection"], "invalid")
+        self.assertEqual(payload["status"], "error")
+
+    def test_health_rejects_projection_with_previous_table_shape(self) -> None:
+        """Health should validate the complete current schema, not only imports."""
+        self._write_config()
+        database_path = self.data_dir / "algobotdash.sqlite"
+        connection = sqlite3.connect(database_path)
+        connection.executescript(SCHEMA)
+        connection.execute("DROP TABLE transactions")
+        connection.execute("CREATE TABLE transactions (id INTEGER PRIMARY KEY)")
+        connection.commit()
+        connection.close()
 
         payload = self._health_payload()
 

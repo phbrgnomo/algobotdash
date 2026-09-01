@@ -16,7 +16,8 @@ _POSITION_INSERT = (
     "INSERT INTO positions("
     "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
     "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
-    "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "swap, pnl, is_associated, import_id) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 

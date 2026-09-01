@@ -48,7 +48,11 @@ poetry install
 poetry run python -m algobotdash
 ```
 
-A atualização escreve uma base temporária e só a publica ao concluir. A projeção contém `imports`, `positions`, `orders`, `transactions` e `rejected_rows`; comentários sem grupo ficam preservados com `strategy` nula. A API mantém grupo e família do símbolo separados para auditoria e expõe a identidade analítica derivada `strategy_key` no formato `WIN FVG`, inclusive no catálogo observado `/api/strategy-keys`. Uma ambiguidade de agrupamento interrompe a atualização e mantém a última projeção válida.
+A atualização escreve uma base temporária e só a publica ao concluir. A projeção contém `imports`, `positions`, `orders`, `transactions` e `rejected_rows`; comentários sem grupo ficam preservados com `strategy` nula. Uma posição pode estar associada a uma ordem mesmo sem estratégia classificada, pois associação exige ticket e símbolo bruto coincidentes. A API mantém grupo e família do símbolo separados para auditoria e expõe a identidade analítica derivada `strategy_key` no formato `WIN FVG`, inclusive no catálogo observado `/api/strategy-keys`. `/api/filter-options` fornece os valores observados usados pelos filtros do dashboard. Uma ambiguidade de agrupamento interrompe a atualização e mantém a última projeção válida.
+
+`/api/positions` usa `status=closed` e `association=all` por padrão. O filtro `association` aceita `associated`, `unassociated` e `all`; a resposta usa os dois primeiros valores para informar o vínculo de cada posição.
+
+Até a entrega do MVP, o SQLite usa um único schema corrente, sem tabela de versão ou migrações. Depois de uma alteração estrutural, regenere a projeção a partir do Excel. O refresh reaproveita o histórico de importações somente quando a tabela `imports` anterior permanece legível.
 
 ### Pré-requisitos
 
