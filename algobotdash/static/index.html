@@ -7,71 +7,203 @@
     <style>
       :root { color-scheme: dark; font: 16px system-ui, sans-serif; }
       body { background: #101418; color: #e7edf2; margin: 0; }
-      main { margin: 8vh auto; max-width: 720px; padding: 0 24px; }
-      section { background: #192127; border: 1px solid #34414a; border-radius: 8px; padding: 20px; }
-      dl { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-      dt { color: #9eabb4; } dd { margin: 0; }
+      main { margin: 6vh auto; max-width: 1120px; padding: 0 24px; }
+      section { background: #192127; border: 1px solid #34414a; border-radius: 8px; margin-top: 20px; padding: 20px; }
+      dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      dt, small { color: #9eabb4; } dd { margin: 0; overflow-wrap: anywhere; }
       .ok { color: #59d69b; } .warn { color: #f5c15d; } .error { color: #ff7b86; }
-      #error { margin-top: 20px; color: #ffb4ba; }
-      small { color: #9eabb4; }
+      #error, #table-state { margin-top: 16px; color: #ffb4ba; }
+      .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
+      .controls, .pagination { align-items: center; display: flex; gap: 8px; }
+      button, select { background: #24323b; border: 1px solid #50616c; border-radius: 4px; color: inherit; padding: 7px 10px; }
+      button:disabled { cursor: not-allowed; opacity: .5; }
+      .table-wrap { overflow-x: auto; }
+      table { border-collapse: collapse; margin-top: 16px; min-width: 900px; width: 100%; }
+      th, td { border-bottom: 1px solid #34414a; padding: 10px 8px; text-align: left; white-space: nowrap; }
+      th { color: #9eabb4; font-weight: 600; }
+      .numeric { text-align: right; }
+      @media (max-width: 640px) { dl { grid-template-columns: 1fr; } main { padding: 0 16px; } }
     </style>
   </head>
   <body>
     <main>
       <h1>algobotdash</h1>
-      <p>Dashboard local de análise reproduzível de trades.</p>
-      <section aria-live="polite">
+      <p>Dashboard local de análise reproduzível de posições analíticas.</p>
+
+      <section aria-live="polite" aria-label="Estado operacional">
         <dl>
-          <dt>Serviço</dt><dd id="service">consultando...</dd>
+          <dt>Estado</dt><dd id="service">consultando...</dd>
           <dt>Configuração</dt><dd id="configuration">consultando...</dd>
           <dt>Fonte Excel</dt><dd id="source">consultando...</dd>
           <dt>Projeção SQLite</dt><dd id="projection">consultando...</dd>
-          <dt>Última importação</dt><dd id="last-imported-at">—</dd>
+          <dt>Arquivo da fonte</dt><dd id="source-name">—</dd>
+          <dt>Hash da fonte</dt><dd id="source-hash">—</dd>
+          <dt>Última importação válida</dt><dd id="last-imported-at">—</dd>
         </dl>
         <p id="error" hidden></p>
         <small id="updated-at">Ainda não atualizado.</small>
       </section>
+
+      <section aria-labelledby="positions-title">
+        <div class="toolbar">
+          <div>
+            <h2 id="positions-title">Posições analíticas</h2>
+            <small id="page-summary">Consultando posições...</small>
+          </div>
+          <div class="controls">
+            <label for="sort-by">Ordenar por</label>
+            <select id="sort-by">
+              <option value="closed_at">Encerramento</option>
+              <option value="opened_at">Abertura</option>
+              <option value="realized_pnl">P&amp;L realizado</option>
+              <option value="symbol_family">Símbolo</option>
+              <option value="status">Status</option>
+            </select>
+            <select id="sort-order" aria-label="Direção da ordenação">
+              <option value="desc">Decrescente</option>
+              <option value="asc">Crescente</option>
+            </select>
+          </div>
+        </div>
+        <p id="table-state" hidden></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>Estratégia</th><th>Símbolo</th><th>Direção</th>
+                <th>Abertura</th><th>Encerramento</th><th>Status</th><th class="numeric">P&amp;L realizado</th>
+              </tr>
+            </thead>
+            <tbody id="positions-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <button id="previous-page" type="button">Anterior</button>
+          <button id="next-page" type="button">Próxima</button>
+        </div>
+      </section>
     </main>
     <script>
-      const fields = ["configuration", "source", "projection"];
-      let lastState = null;
+      const page = {limit: 50, offset: 0, total: 0};
+      const sortBy = document.querySelector("#sort-by");
+      const sortOrder = document.querySelector("#sort-order");
+      let latestImportKey = null;
 
       function label(value) {
         return {valid: "válida", invalid: "inválida", available: "disponível",
-          missing: "ausente", unavailable: "indisponível", unknown: "desconhecida"}[value] || value;
+          missing: "ausente", unavailable: "indisponível", unknown: "desconhecida",
+          ready: "pronto", empty: "sem importação válida"}[value] || value;
       }
 
-      function render(data) {
-        lastState = data;
-        document.querySelector("#service").textContent = data.status === "ok" ? "online" : data.status;
-        document.querySelector("#service").className = data.status === "ok" ? "ok" : "error";
-        fields.forEach((field) => {
+      function formatDate(value) {
+        return value ? new Date(value).toLocaleString("pt-BR") : "—";
+      }
+
+      function formatPnl(value) {
+        return value === null ? "—" : new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 2}).format(value);
+      }
+
+      function setNotice(id, message, visible) {
+        const element = document.querySelector(id);
+        element.hidden = !visible;
+        element.textContent = message;
+      }
+
+      function renderStatus(data) {
+        const service = document.querySelector("#service");
+        service.textContent = label(data.state);
+        service.className = data.state === "ready" ? "ok" : data.state === "empty" ? "warn" : "error";
+        ["configuration", "source", "projection"].forEach((field) => {
           const element = document.querySelector(`#${field}`);
           element.textContent = label(data[field]);
-          element.className = ["valid", "available", "ok"].includes(data[field]) ? "ok" : "warn";
+          element.className = ["valid", "available"].includes(data[field]) ? "ok" : "warn";
         });
-        document.querySelector("#last-imported-at").textContent = data.last_imported_at || "—";
-        const error = document.querySelector("#error");
-        const messages = [data.error, data.projection_error].filter(Boolean);
-        error.hidden = messages.length === 0;
-        error.textContent = messages.map((message) => `Atenção: ${message}`).join(" ");
-        document.querySelector("#updated-at").textContent = `Atualizado em ${new Date().toLocaleTimeString()}`;
+        document.querySelector("#source-name").textContent = data.source_name || "—";
+        document.querySelector("#source-hash").textContent = data.last_import?.source_hash || "—";
+        document.querySelector("#last-imported-at").textContent = formatDate(data.last_import?.imported_at);
+        document.querySelector("#updated-at").textContent = `Atualizado em ${new Date().toLocaleTimeString("pt-BR")}`;
       }
 
-      async function refresh() {
+      function renderPositions(data) {
+        page.total = data.total;
+        const body = document.querySelector("#positions-body");
+        body.replaceChildren(...data.items.map((position) => {
+          const row = document.createElement("tr");
+          [position.position_id, position.strategy || "Não associada", position.symbol_family || "—",
+            position.direction, formatDate(position.opened_at), formatDate(position.closed_at),
+            position.status, formatPnl(position.realized_pnl)].forEach((value, index) => {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            if (index === 7) cell.className = "numeric";
+            row.append(cell);
+          });
+          return row;
+        }));
+        const first = data.total === 0 ? 0 : page.offset + 1;
+        const last = Math.min(page.offset + data.items.length, data.total);
+        document.querySelector("#page-summary").textContent = data.total === 0
+          ? "Nenhuma posição analítica disponível."
+          : `Mostrando ${first}–${last} de ${data.total} posições.`;
+        document.querySelector("#previous-page").disabled = page.offset === 0;
+        document.querySelector("#next-page").disabled = page.offset + page.limit >= data.total;
+        setNotice("#table-state", "", false);
+      }
+
+      async function loadPositions() {
+        const query = new URLSearchParams({limit: page.limit, offset: page.offset,
+          sort_by: sortBy.value, sort_order: sortOrder.value});
         try {
-          const response = await fetch("/health", {cache: "no-store"});
+          const response = await fetch(`/api/positions?${query}`, {cache: "no-store"});
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          render(await response.json());
+          renderPositions(await response.json());
         } catch (error) {
-          const notice = document.querySelector("#error");
-          notice.hidden = false;
-          notice.textContent = `Atenção: não foi possível atualizar o estado (${error.message}).`;
-          if (lastState) document.querySelector("#updated-at").textContent += " — mantendo o último estado válido";
+          document.querySelector("#positions-body").replaceChildren();
+          document.querySelector("#page-summary").textContent = "Posições indisponíveis.";
+          setNotice("#table-state", `Atenção: não foi possível consultar posições (${error.message}).`, true);
+          document.querySelector("#previous-page").disabled = true;
+          document.querySelector("#next-page").disabled = true;
         }
       }
-      refresh();
-      setInterval(refresh, 5000);
+
+      async function loadStatus() {
+        try {
+          const response = await fetch("/api/status", {cache: "no-store"});
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          renderStatus(data);
+          setNotice("#error", "", false);
+          const importKey = data.last_import?.source_hash || null;
+          if (data.state === "ready" && importKey !== latestImportKey) {
+            latestImportKey = importKey;
+            page.offset = 0;
+            await loadPositions();
+          }
+          if (data.state === "empty") {
+            latestImportKey = null;
+            renderPositions({items: [], total: 0});
+          }
+          if (data.state === "unavailable") {
+            document.querySelector("#positions-body").replaceChildren();
+            document.querySelector("#page-summary").textContent = "Projeção indisponível.";
+            document.querySelector("#previous-page").disabled = true;
+            document.querySelector("#next-page").disabled = true;
+            setNotice("#table-state", "Atenção: a projeção SQLite está indisponível.", true);
+          }
+        } catch (error) {
+          setNotice("#error", `Atenção: não foi possível atualizar o estado (${error.message}).`, true);
+        }
+      }
+
+      sortBy.addEventListener("change", () => { page.offset = 0; loadPositions(); });
+      sortOrder.addEventListener("change", () => { page.offset = 0; loadPositions(); });
+      document.querySelector("#previous-page").addEventListener("click", () => {
+        page.offset = Math.max(0, page.offset - page.limit); loadPositions();
+      });
+      document.querySelector("#next-page").addEventListener("click", () => {
+        page.offset += page.limit; loadPositions();
+      });
+      loadStatus();
+      setInterval(loadStatus, 5000);
     </script>
   </body>
 </html>

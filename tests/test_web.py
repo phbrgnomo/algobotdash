@@ -69,6 +69,18 @@ class WebTests(unittest.TestCase):
         self.assertIn("Dashboard local", page)
         self.assertNotIn("generate_trade_report", page)
 
+    def test_dashboard_static_contract_includes_status_and_positions_view(self) -> None:
+        """Dashboard should retain the query API calls and basic table controls."""
+        page = dashboard().path
+        content = Path(page).read_text(encoding="utf-8")
+
+        self.assertIn('fetch("/api/status"', content)
+        self.assertIn("/api/positions?${query}", content)
+        self.assertIn('id="positions-body"', content)
+        self.assertIn('id="previous-page"', content)
+        self.assertIn('id="next-page"', content)
+        self.assertIn("Projeção indisponível.", content)
+
     def test_fastapi_serves_dashboard_over_http(self) -> None:
         """FastAPI should expose the dashboard at the root endpoint."""
 
