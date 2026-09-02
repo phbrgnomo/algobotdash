@@ -194,6 +194,7 @@ class QueryApiTests(unittest.TestCase):
                     [item["position_id"] for item in response.json()["items"]],
                     expected,
                 )
+                self.assertEqual(response.json()["total"], len(expected))
 
     def test_position_dates_use_bahia_day_and_status_specific_timestamp(self) -> None:
         """Use exit day for closed positions and entry day for open positions."""
@@ -283,6 +284,18 @@ class QueryApiTests(unittest.TestCase):
                 "strategies": ["FVG", "Turtle"],
                 "symbol_families": ["BIT", "WDO", "WIN"],
             },
+        )
+
+    def test_filter_options_reject_malformed_projection(self) -> None:
+        """Return the public projection error when SQLite cannot be queried."""
+        self.database_path.write_bytes(b"not a sqlite database")
+
+        response = self._request("/api/filter-options")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(),
+            {"detail": {"code": "projection_unavailable"}},
         )
 
     def test_positions_reject_invalid_pagination_and_sorting(self) -> None:

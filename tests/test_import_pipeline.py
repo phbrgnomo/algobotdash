@@ -264,6 +264,25 @@ class ImportPipelineTests(unittest.TestCase):
         self.assertIsNone(positions[0].strategy)
         self.assertTrue(positions[0].is_associated)
 
+    def test_read_report_rejects_order_association_when_symbol_differs(self) -> None:
+        """A matching ticket with another raw symbol cannot supply order metadata."""
+        source = self.tmp_path / "history.xlsx"
+        workbook(source, legacy_report=True)
+        book = load_workbook(source)
+        sheet = book.active
+        if sheet is None:
+            raise RuntimeError("workbook fixture has no active worksheet")
+        sheet["C8"] = "WINV26"
+        book.save(source)
+
+        positions, orders, _, _, _ = read_report(source, config(source))
+
+        self.assertEqual(orders[0].order_id, positions[0].position_id)
+        self.assertNotEqual(orders[0].symbol_raw, positions[0].symbol_raw)
+        self.assertEqual(positions[0].comment, "")
+        self.assertIsNone(positions[0].strategy)
+        self.assertFalse(positions[0].is_associated)
+
     def test_refresh_persists_matching_unclassified_order_as_associated(self) -> None:
         """Persist proven association independently from strategy classification."""
         source = self.tmp_path / "history.xlsx"
