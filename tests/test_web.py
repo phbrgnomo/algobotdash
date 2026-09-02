@@ -80,6 +80,7 @@ class WebTests(unittest.TestCase):
         self.assertIn('fetch("/api/status"', content)
         self.assertIn('fetch("/api/filter-options"', content)
         self.assertIn("/api/positions?${query}", content)
+        self.assertIn("/api/metrics?${query}", content)
         self.assertIn('id="filter-strategy"', content)
         self.assertIn('id="filter-symbol-family"', content)
         self.assertIn('id="filter-direction"', content)
@@ -94,6 +95,18 @@ class WebTests(unittest.TestCase):
         self.assertIn('<legend>Filtros das posições</legend>', content)
         self.assertIn('id="filter-state" aria-live="polite"', content)
         self.assertIn('id="table-state" role="alert"', content)
+        self.assertIn('id="metrics-state" role="alert"', content)
+        self.assertIn('id="metric-net-pnl"', content)
+        self.assertIn('id="metric-gross-profit"', content)
+        self.assertIn('id="metric-gross-loss"', content)
+        self.assertIn('id="metric-win-rate"', content)
+        self.assertIn('id="metric-profit-factor"', content)
+        self.assertIn('id="metric-payoff"', content)
+        self.assertIn('id="metric-expectancy"', content)
+        self.assertIn('id="metric-position-sharpe"', content)
+        self.assertIn('id="metric-position-sortino"', content)
+        self.assertIn('id="metric-total-sample"', content)
+        self.assertIn('id="metric-excluded-open"', content)
         self.assertIn("Projeção indisponível.", content)
 
     @unittest.skipUnless(NODE_EXECUTABLE, "requires Node.js for JavaScript execution")
@@ -112,9 +125,12 @@ class Element {
 }
 const ids = ["service", "configuration", "source", "projection", "source-name",
   "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
-  "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
-  "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
-  "filter-association", "date-from", "date-to"];
+  "metrics-state", "metric-net-pnl", "metric-gross-profit", "metric-gross-loss",
+  "metric-win-rate", "metric-profit-factor", "metric-payoff", "metric-expectancy",
+  "metric-position-sharpe", "metric-position-sortino", "metric-total-sample",
+  "metric-excluded-open", "positions-body", "page-summary", "previous-page", "next-page",
+  "sort-by", "sort-order", "filter-strategy", "filter-symbol-family", "filter-direction",
+  "filter-status", "filter-association", "date-from", "date-to"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -137,6 +153,13 @@ const context = {
     if (url === "/api/filter-options") {
       if (filterMode === "pending") return new Promise((resolve) => pendingFilters.push(resolve));
       return {ok: true, status: 200, json: async () => ({strategies: ["Turtle"], symbol_families: ["WIN"]})};
+    }
+    if (url.startsWith("/api/metrics")) {
+      return {ok: true, status: 200, json: async () => ({
+        total_sample: 0, excluded_open_count: 0, net_pnl: null, gross_profit: null, gross_loss: null,
+        win_rate: null, profit_factor: null, payoff: null, expectancy: null, position_sharpe: null,
+        position_sortino: null, unavailable_reasons: {},
+      })};
     }
     positionFetches += 1;
     if (positionMode === "pending") return new Promise((resolve) => pendingPositions.push(resolve));
@@ -233,9 +256,12 @@ class Element {
 }
 const ids = ["service", "configuration", "source", "projection", "source-name",
   "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
-  "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
-  "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
-  "filter-association", "date-from", "date-to"];
+  "metrics-state", "metric-net-pnl", "metric-gross-profit", "metric-gross-loss",
+  "metric-win-rate", "metric-profit-factor", "metric-payoff", "metric-expectancy",
+  "metric-position-sharpe", "metric-position-sortino", "metric-total-sample",
+  "metric-excluded-open", "positions-body", "page-summary", "previous-page", "next-page",
+  "sort-by", "sort-order", "filter-strategy", "filter-symbol-family", "filter-direction",
+  "filter-status", "filter-association", "date-from", "date-to"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -266,6 +292,13 @@ const context = {
       filterFetches += 1;
       if (filterMode === "failure") return {ok: false, json: async () => ({})};
       return {ok: true, json: async () => filterPayload};
+    }
+    if (url.startsWith("/api/metrics")) {
+      return {ok: true, json: async () => ({
+        total_sample: 0, excluded_open_count: 0, net_pnl: null, gross_profit: null, gross_loss: null,
+        win_rate: null, profit_factor: null, payoff: null, expectancy: null, position_sharpe: null,
+        position_sortino: null, unavailable_reasons: {},
+      })};
     }
     positionFetches += 1;
     lastPositionUrl = url;

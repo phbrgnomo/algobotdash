@@ -18,6 +18,7 @@ from .storage import (
     ProjectionUnavailableError,
     read_filter_options,
     read_imports,
+    read_metrics,
     read_position_orders,
     read_positions,
     read_strategy_keys,
@@ -100,11 +101,10 @@ def _optional_dimension(value: str | None, name: str) -> str | None:
         return None
     if normalized := value.strip():
         return normalized
-    else:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "invalid_filter", "field": name},
-        )
+    raise HTTPException(
+        status_code=422,
+        detail={"code": "invalid_filter", "field": name},
+    )
 
 
 def _status_state() -> dict[str, Any]:
@@ -212,6 +212,49 @@ async def positions_endpoint(
         raise _projection_error(exc) from exc
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 # pylint: enable=too-many-arguments,too-many-positional-arguments,too-many-locals
+
+
+# FastAPI exposes each query parameter through the endpoint signature.
+# pylint: disable=too-many-arguments,too-many-positional-arguments
+@app.get("/api/metrics")
+async def metrics_endpoint(
+    strategy: str | None = None,
+    symbol_family: str | None = None,
+    direction: Literal["buy", "sell"] | None = None,
+    status: Literal["closed", "open", "all"] = "closed",
+    association: Literal["associated", "unassociated", "all"] = "all",
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> dict[str, Any]:
+    """Return realized summary and ratio metrics for analytical positions."""
+    normalized_strategy = _optional_dimension(strategy, "strategy")
+    normalized_symbol_family = _optional_dimension(symbol_family, "symbol_family")
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_date_range"},
+        )
+    if normalized_strategy is not None and association == "unassociated":
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "contradictory_filters"},
+        )
+    try:
+        return read_metrics(
+            DATABASE_PATH,
+            filters=PositionFilters(
+                strategy=normalized_strategy,
+                symbol_family=normalized_symbol_family,
+                direction=direction,
+                status=status,
+                association=association,
+                date_from=date_from,
+                date_to=date_to,
+            ),
+        )
+    except ProjectionUnavailableError as exc:
+        raise _projection_error(exc) from exc
+# pylint: enable=too-many-arguments,too-many-positional-arguments
 
 
 @app.get("/api/filter-options")

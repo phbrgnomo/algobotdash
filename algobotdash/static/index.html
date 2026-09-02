@@ -11,8 +11,12 @@
       section { background: #192127; border: 1px solid #34414a; border-radius: 8px; margin-top: 20px; padding: 20px; }
       dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
       dt, small { color: #9eabb4; } dd { margin: 0; overflow-wrap: anywhere; }
+      .metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; margin-top: 12px; }
+      .metric-card { background: #202b33; border: 1px solid #34414a; border-radius: 6px; padding: 12px; }
+      .metric-card dt { font-size: 13px; color: #9eabb4; margin-bottom: 4px; }
+      .metric-card dd { font-size: 18px; font-weight: 600; margin: 0; color: #e7edf2; }
       .ok { color: #59d69b; } .warn { color: #f5c15d; } .error { color: #ff7b86; }
-      #error, #filter-state, #table-state { margin-top: 16px; color: #ffb4ba; }
+      #error, #filter-state, #table-state, #metrics-state { margin-top: 16px; color: #ffb4ba; }
       .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
       .controls, .filters, .pagination { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
       .filters { border: 0; border-top: 1px solid #34414a; margin-top: 16px; padding: 16px 0 0; }
@@ -45,6 +49,24 @@
         </dl>
         <p id="error" hidden></p>
         <small id="updated-at">Ainda não atualizado.</small>
+      </section>
+
+      <section aria-labelledby="metrics-title">
+        <h2 id="metrics-title">Métricas realizadas</h2>
+        <p id="metrics-state" role="alert" hidden></p>
+        <div class="metrics-grid">
+          <div class="metric-card"><dt>P&amp;L líquido</dt><dd id="metric-net-pnl">—</dd></div>
+          <div class="metric-card"><dt>Ganho bruto</dt><dd id="metric-gross-profit">—</dd></div>
+          <div class="metric-card"><dt>Perda bruta</dt><dd id="metric-gross-loss">—</dd></div>
+          <div class="metric-card"><dt>Taxa de acerto</dt><dd id="metric-win-rate">—</dd></div>
+          <div class="metric-card"><dt>Profit Factor</dt><dd id="metric-profit-factor">—</dd></div>
+          <div class="metric-card"><dt>Payoff</dt><dd id="metric-payoff">—</dd></div>
+          <div class="metric-card"><dt>Expectância</dt><dd id="metric-expectancy">—</dd></div>
+          <div class="metric-card"><dt>Sharpe por posição</dt><dd id="metric-position-sharpe">—</dd></div>
+          <div class="metric-card"><dt>Sortino por posição</dt><dd id="metric-position-sortino">—</dd></div>
+          <div class="metric-card"><dt>Amostra realizada</dt><dd id="metric-total-sample">—</dd></div>
+          <div class="metric-card"><dt>Abertas excluídas</dt><dd id="metric-excluded-open">—</dd></div>
+        </div>
       </section>
 
       <section aria-labelledby="positions-title">
@@ -122,6 +144,7 @@
       let latestImportKey = null;
       let latestFilterImportKey = null;
       let positionRequestGeneration = 0;
+      let metricsRequestGeneration = 0;
       let statusRequestGeneration = 0;
       let filterRequestGeneration = 0;
 
@@ -135,14 +158,41 @@
         return value ? new Date(value).toLocaleString("pt-BR") : "—";
       }
 
+      function formatDecimal(value, digits = 2) {
+        return value === null || value === undefined
+          ? "—"
+          : new Intl.NumberFormat("pt-BR", {
+              minimumFractionDigits: digits,
+              maximumFractionDigits: digits,
+            }).format(value);
+      }
+
+      function formatPercent(value, digits = 2) {
+        return value === null || value === undefined
+          ? "—"
+          : new Intl.NumberFormat("pt-BR", {
+              style: "percent",
+              minimumFractionDigits: digits,
+              maximumFractionDigits: digits,
+            }).format(value);
+      }
+
+      function formatInteger(value) {
+        return value === null || value === undefined
+          ? "—"
+          : new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 0}).format(value);
+      }
+
       function formatPnl(value) {
-        return value === null ? "—" : new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 2}).format(value);
+        return formatDecimal(value, 2);
       }
 
       function setNotice(id, message, visible) {
         const element = document.querySelector(id);
-        element.hidden = !visible;
-        element.textContent = message;
+        if (element) {
+          element.hidden = !visible;
+          element.textContent = message;
+        }
       }
 
       function renderStatus(data) {
@@ -158,6 +208,81 @@
         document.querySelector("#source-hash").textContent = data.last_import?.source_hash || "—";
         document.querySelector("#last-imported-at").textContent = formatDate(data.last_import?.imported_at);
         document.querySelector("#updated-at").textContent = `Atualizado em ${new Date().toLocaleTimeString("pt-BR")}`;
+      }
+
+      function resetMetrics() {
+        ["net-pnl", "gross-profit", "gross-loss", "win-rate", "profit-factor",
+         "payoff", "expectancy", "position-sharpe", "position-sortino",
+         "total-sample", "excluded-open"].forEach((key) => {
+          const el = document.querySelector(`#metric-${key}`);
+          if (el) el.textContent = "—";
+        });
+      }
+
+      function renderMetrics(data) {
+        const setVal = (id, val) => {
+          const el = document.querySelector(id);
+          if (el) el.textContent = val;
+        };
+        setVal("#metric-net-pnl", formatDecimal(data.net_pnl, 2));
+        setVal("#metric-gross-profit", formatDecimal(data.gross_profit, 2));
+        setVal("#metric-gross-loss", formatDecimal(data.gross_loss, 2));
+        setVal("#metric-win-rate", formatPercent(data.win_rate, 2));
+        setVal("#metric-profit-factor", formatDecimal(data.profit_factor, 3));
+        setVal("#metric-payoff", formatDecimal(data.payoff, 3));
+        setVal("#metric-expectancy", formatDecimal(data.expectancy, 2));
+        setVal("#metric-position-sharpe", formatDecimal(data.position_sharpe, 3));
+        setVal("#metric-position-sortino", formatDecimal(data.position_sortino, 3));
+        setVal("#metric-total-sample", formatInteger(data.total_sample));
+        setVal("#metric-excluded-open", formatInteger(data.excluded_open_count));
+        setNotice("#metrics-state", "", false);
+      }
+
+      async function loadMetrics() {
+        const requestGeneration = ++metricsRequestGeneration;
+        if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+          setNotice("#metrics-state", "Atenção: a data inicial deve ser anterior ou igual à data final.", true);
+          return "handled";
+        }
+        const query = new URLSearchParams();
+        [["strategy", filterStrategy.value], ["symbol_family", filterSymbolFamily.value],
+          ["direction", filterDirection.value], ["status", filterStatus.value],
+          ["association", filterAssociation.value === "all" ? "" : filterAssociation.value],
+          ["date_from", dateFrom.value], ["date_to", dateTo.value]].forEach(([name, value]) => {
+          if (value) query.set(name, value);
+        });
+        try {
+          const response = await fetch(`/api/metrics?${query}`, {cache: "no-store"});
+          if (!response.ok) {
+            let code = null;
+            try {
+              const payload = await response.json();
+              code = payload.detail?.code || null;
+            } catch (_error) {
+              // A response body is optional; the HTTP status remains useful.
+            }
+            const messages = {
+              invalid_date_range: "A data inicial deve ser anterior ou igual à data final.",
+              contradictory_filters: "Uma estratégia não pode ser combinada com posições não associadas.",
+            };
+            const error = new Error(messages[code] || `HTTP ${response.status}`);
+            error.retryable = response.status === undefined || response.status >= 500;
+            throw error;
+          }
+          const data = await response.json();
+          if (requestGeneration !== metricsRequestGeneration) return false;
+          renderMetrics(data);
+          return true;
+        } catch (error) {
+          if (requestGeneration !== metricsRequestGeneration) return false;
+          resetMetrics();
+          setNotice("#metrics-state", `Atenção: não foi possível consultar métricas (${error.message}).`, true);
+          if (error.retryable !== false) {
+            latestImportKey = null;
+            return false;
+          }
+          return "handled";
+        }
       }
 
       function renderPositions(data) {
@@ -292,20 +417,41 @@
             }
             if (importKey !== latestImportKey) {
               page.offset = 0;
-              const loaded = await loadPositions();
+              const [positionsLoaded, metricsLoaded] = await Promise.all([loadPositions(), loadMetrics()]);
               if (requestGeneration !== statusRequestGeneration) return;
-              if (loaded === true || loaded === "handled") latestImportKey = importKey;
+              if (
+                (positionsLoaded === true || positionsLoaded === "handled") &&
+                (metricsLoaded === true || metricsLoaded === "handled")
+              ) {
+                latestImportKey = importKey;
+              }
             }
           }
           if (data.state === "empty") {
             positionRequestGeneration += 1;
+            metricsRequestGeneration += 1;
             filterRequestGeneration += 1;
             latestImportKey = null;
             latestFilterImportKey = null;
             renderPositions({items: [], total: 0});
+            renderMetrics({
+              total_sample: 0,
+              excluded_open_count: 0,
+              net_pnl: null,
+              gross_profit: null,
+              gross_loss: null,
+              win_rate: null,
+              profit_factor: null,
+              payoff: null,
+              expectancy: null,
+              position_sharpe: null,
+              position_sortino: null,
+              unavailable_reasons: {},
+            });
           }
           if (data.state === "unavailable") {
             positionRequestGeneration += 1;
+            metricsRequestGeneration += 1;
             filterRequestGeneration += 1;
             latestImportKey = null;
             latestFilterImportKey = null;
@@ -314,6 +460,8 @@
             document.querySelector("#previous-page").disabled = true;
             document.querySelector("#next-page").disabled = true;
             setNotice("#table-state", "Atenção: a projeção SQLite está indisponível.", true);
+            resetMetrics();
+            setNotice("#metrics-state", "Atenção: a projeção SQLite está indisponível.", true);
           }
         } catch (error) {
           if (requestGeneration !== statusRequestGeneration) return;
@@ -335,6 +483,7 @@
           }
           page.offset = 0;
           loadPositions();
+          loadMetrics();
         });
       });
       document.querySelector("#previous-page").addEventListener("click", () => {

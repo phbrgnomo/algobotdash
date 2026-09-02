@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -292,6 +293,168 @@ def _normalize_timestamps(
 
 
 # pylint: disable=too-many-arguments,too-many-locals
+def read_metrics(
+    path: Path, filters: PositionFilters | None = None
+) -> dict[str, Any]:
+    """Calculate realized performance metrics for analytical positions."""
+    active_filters = filters or PositionFilters()
+    where_sql, parameters = _position_where(active_filters)
+    query = (
+        f"SELECT status, pnl FROM positions {where_sql}"  # noqa: S608  # nosec B608
+    )
+    connection = _open_projection(path)
+    try:
+        try:
+            rows = connection.execute(query, parameters).fetchall()
+        except sqlite3.Error as exc:
+            raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
+    finally:
+        connection.close()
+
+    is_open_only = active_filters.status == "open"
+    if is_open_only:
+        excluded_open = len(rows)
+        closed_pnls: list[float] = []
+    elif active_filters.status == "closed":
+        excluded_open = 0
+        closed_pnls = [float(row["pnl"]) for row in rows if row["pnl"] is not None]
+    else:  # status == "all"
+        excluded_open = sum(1 for row in rows if row["status"] == "open")
+        closed_pnls = [
+            float(row["pnl"])
+            for row in rows
+            if row["status"] == "closed" and row["pnl"] is not None
+        ]
+
+    return _compute_realized_metrics(
+        closed_pnls,
+        excluded_open_count=excluded_open,
+        is_open_only=is_open_only,
+    )
+
+
+# pylint: disable=too-many-branches,too-many-statements
+def _compute_realized_metrics(
+    pnls: list[float],
+    *,
+    excluded_open_count: int = 0,
+    is_open_only: bool = False,
+) -> dict[str, Any]:
+    """Compute summary and ratio metrics according to declared conventions."""
+    unavailable_reasons: dict[str, str] = {}
+    metric_keys = [
+        "net_pnl",
+        "gross_profit",
+        "gross_loss",
+        "win_rate",
+        "profit_factor",
+        "payoff",
+        "expectancy",
+        "position_sharpe",
+        "position_sortino",
+    ]
+
+    if is_open_only:
+        for key in metric_keys:
+            unavailable_reasons[key] = "open_positions_only"
+        return {
+            "total_sample": 0,
+            "excluded_open_count": excluded_open_count,
+            "net_pnl": None,
+            "gross_profit": None,
+            "gross_loss": None,
+            "win_rate": None,
+            "profit_factor": None,
+            "payoff": None,
+            "expectancy": None,
+            "position_sharpe": None,
+            "position_sortino": None,
+            "unavailable_reasons": unavailable_reasons,
+        }
+
+    n = len(pnls)
+    if n == 0:
+        for key in metric_keys:
+            unavailable_reasons[key] = "empty_sample"
+        return {
+            "total_sample": 0,
+            "excluded_open_count": excluded_open_count,
+            "net_pnl": None,
+            "gross_profit": None,
+            "gross_loss": None,
+            "win_rate": None,
+            "profit_factor": None,
+            "payoff": None,
+            "expectancy": None,
+            "position_sharpe": None,
+            "position_sortino": None,
+            "unavailable_reasons": unavailable_reasons,
+        }
+
+    net_pnl = sum(pnls)
+    wins = [x for x in pnls if x > 0]
+    losses = [x for x in pnls if x < 0]
+    gross_profit = sum(wins)
+    gross_loss = -sum(losses)
+    win_rate = len(wins) / n
+    expectancy = net_pnl / n
+
+    if gross_loss > 0:
+        profit_factor: float | None = gross_profit / gross_loss
+    else:
+        profit_factor = None
+        unavailable_reasons["profit_factor"] = "zero_gross_loss"
+
+    if wins and losses:
+        avg_win = gross_profit / len(wins)
+        avg_loss = gross_loss / len(losses)
+        payoff: float | None = avg_win / avg_loss
+    elif not wins and not losses:
+        payoff = None
+        unavailable_reasons["payoff"] = "no_wins_or_losses"
+    elif not wins:
+        payoff = None
+        unavailable_reasons["payoff"] = "no_wins"
+    else:
+        payoff = None
+        unavailable_reasons["payoff"] = "no_losses"
+
+    if n < 2:
+        position_sharpe: float | None = None
+        unavailable_reasons["position_sharpe"] = "sample_too_small"
+    else:
+        variance = sum((x - expectancy) ** 2 for x in pnls) / (n - 1)
+        std_dev = math.sqrt(variance)
+        if std_dev == 0:
+            position_sharpe = None
+            unavailable_reasons["position_sharpe"] = "zero_dispersion"
+        else:
+            position_sharpe = expectancy / std_dev
+
+    downside_variance = sum(min(0.0, x) ** 2 for x in pnls) / n
+    downside_dev = math.sqrt(downside_variance)
+    if downside_dev == 0:
+        position_sortino: float | None = None
+        unavailable_reasons["position_sortino"] = "zero_downside_deviation"
+    else:
+        position_sortino = expectancy / downside_dev
+
+    return {
+        "total_sample": n,
+        "excluded_open_count": excluded_open_count,
+        "net_pnl": net_pnl,
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "payoff": payoff,
+        "expectancy": expectancy,
+        "position_sharpe": position_sharpe,
+        "position_sortino": position_sortino,
+        "unavailable_reasons": unavailable_reasons,
+    }
+
+
 def read_positions(
     path: Path,
     *,
