@@ -64,6 +64,10 @@
           <div class="metric-card"><dt>Expectância</dt><dd id="metric-expectancy">—</dd></div>
           <div class="metric-card"><dt>Sharpe por posição</dt><dd id="metric-position-sharpe">—</dd></div>
           <div class="metric-card"><dt>Sortino por posição</dt><dd id="metric-position-sortino">—</dd></div>
+          <div class="metric-card"><dt>DD maior profundidade</dt><dd id="metric-max-depth-depth">—</dd></div>
+          <div class="metric-card"><dt>Duração (maior prof.)</dt><dd id="metric-max-depth-duration">—</dd></div>
+          <div class="metric-card"><dt>DD maior duração</dt><dd id="metric-max-duration-depth">—</dd></div>
+          <div class="metric-card"><dt>Duração máxima</dt><dd id="metric-max-duration-duration">—</dd></div>
           <div class="metric-card"><dt>Amostra realizada</dt><dd id="metric-total-sample">—</dd></div>
           <div class="metric-card"><dt>Abertas excluídas</dt><dd id="metric-excluded-open">—</dd></div>
         </div>
@@ -213,6 +217,7 @@
       function resetMetrics() {
         ["net-pnl", "gross-profit", "gross-loss", "win-rate", "profit-factor",
          "payoff", "expectancy", "position-sharpe", "position-sortino",
+         "max-depth-depth", "max-depth-duration", "max-duration-depth", "max-duration-duration",
          "total-sample", "excluded-open"].forEach((key) => {
           const el = document.querySelector(`#metric-${key}`);
           if (el) el.textContent = "—";
@@ -233,6 +238,10 @@
         setVal("#metric-expectancy", formatDecimal(data.expectancy, 2));
         setVal("#metric-position-sharpe", formatDecimal(data.position_sharpe, 3));
         setVal("#metric-position-sortino", formatDecimal(data.position_sortino, 3));
+        setVal("#metric-max-depth-depth", formatDecimal(data.max_depth_episode?.depth, 2));
+        setVal("#metric-max-depth-duration", formatDecimal(data.max_depth_episode?.duration_days, 2));
+        setVal("#metric-max-duration-depth", formatDecimal(data.max_duration_episode?.depth, 2));
+        setVal("#metric-max-duration-duration", formatDecimal(data.max_duration_episode?.duration_days, 2));
         setVal("#metric-total-sample", formatInteger(data.total_sample));
         setVal("#metric-excluded-open", formatInteger(data.excluded_open_count));
         setNotice("#metrics-state", "", false);

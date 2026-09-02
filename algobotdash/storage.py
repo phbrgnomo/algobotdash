@@ -300,7 +300,7 @@ def read_metrics(
     active_filters = filters or PositionFilters()
     where_sql, parameters = _position_where(active_filters)
     query = (
-        f"SELECT status, pnl FROM positions {where_sql}"  # noqa: S608  # nosec B608
+        f"SELECT status, pnl, exit_at FROM positions {where_sql}"  # noqa: S608  # nosec B608
     )
     connection = _open_projection(path)
     try:
@@ -314,28 +314,106 @@ def read_metrics(
     is_open_only = active_filters.status == "open"
     if is_open_only:
         excluded_open = len(rows)
-        closed_pnls: list[float] = []
+        closed_positions: list[tuple[str, float]] = []
     elif active_filters.status == "closed":
         excluded_open = 0
-        closed_pnls = [float(row["pnl"]) for row in rows if row["pnl"] is not None]
+        closed_positions = [
+            (str(row["exit_at"]), float(row["pnl"]))
+            for row in rows
+            if row["pnl"] is not None and row["exit_at"] is not None
+        ]
     else:  # status == "all"
         excluded_open = sum(1 for row in rows if row["status"] == "open")
-        closed_pnls = [
-            float(row["pnl"])
+        closed_positions = [
+            (str(row["exit_at"]), float(row["pnl"]))
             for row in rows
-            if row["status"] == "closed" and row["pnl"] is not None
+            if row["status"] == "closed"
+            and row["pnl"] is not None
+            and row["exit_at"] is not None
         ]
 
     return _compute_realized_metrics(
-        closed_pnls,
+        closed_positions,
         excluded_open_count=excluded_open,
         is_open_only=is_open_only,
     )
 
 
+def _compute_drawdown_episodes(
+    closed_positions: list[tuple[str, float]],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Calculate the maximum depth and maximum duration drawdown episodes."""
+    if not closed_positions:
+        return None, None
+
+    pnl_by_exit: dict[str, float] = {}
+    for exit_at, pnl in closed_positions:
+        utc_exit = _utc_timestamp(exit_at)
+        if utc_exit is not None:
+            pnl_by_exit[utc_exit] = pnl_by_exit.get(utc_exit, 0.0) + pnl
+
+    if not pnl_by_exit:
+        return None, None
+
+    sorted_points = sorted(pnl_by_exit.items(), key=lambda item: item[0])
+
+    episodes: list[dict[str, Any]] = []
+    peak_value = 0.0
+    peak_at = sorted_points[0][0]
+    peak_dt = datetime.fromisoformat(peak_at)
+
+    current_episode: dict[str, Any] | None = None
+    cum_pnl = 0.0
+
+    for exit_at_str, step_pnl in sorted_points:
+        cum_pnl += step_pnl
+        current_dt = datetime.fromisoformat(exit_at_str)
+
+        if cum_pnl < peak_value:
+            depth = peak_value - cum_pnl
+            if current_episode is None:
+                current_episode = {
+                    "depth": depth,
+                    "peak_at": peak_at,
+                    "peak_value": peak_value,
+                    "trough_at": exit_at_str,
+                    "trough_value": cum_pnl,
+                    "recovery_at": None,
+                    "duration_days": 0.0,
+                }
+            else:
+                if cum_pnl < current_episode["trough_value"]:
+                    current_episode["trough_value"] = cum_pnl
+                    current_episode["trough_at"] = exit_at_str
+                    current_episode["depth"] = depth
+        else:
+            if current_episode is not None:
+                current_episode["recovery_at"] = exit_at_str
+                duration_seconds = (current_dt - peak_dt).total_seconds()
+                current_episode["duration_days"] = duration_seconds / 86400.0
+                episodes.append(current_episode)
+                current_episode = None
+            peak_value = cum_pnl
+            peak_at = exit_at_str
+            peak_dt = current_dt
+
+    if current_episode is not None:
+        last_dt = datetime.fromisoformat(sorted_points[-1][0])
+        duration_seconds = (last_dt - peak_dt).total_seconds()
+        current_episode["duration_days"] = duration_seconds / 86400.0
+        episodes.append(current_episode)
+
+    if not episodes:
+        return None, None
+
+    max_depth_episode = max(episodes, key=lambda ep: ep["depth"])
+    max_duration_episode = max(episodes, key=lambda ep: ep["duration_days"])
+    return max_depth_episode, max_duration_episode
+
+
 # pylint: disable=too-many-branches,too-many-statements
 def _compute_realized_metrics(
-    pnls: list[float],
+    closed_positions: list[tuple[str, float]],
     *,
     excluded_open_count: int = 0,
     is_open_only: bool = False,
@@ -352,6 +430,8 @@ def _compute_realized_metrics(
         "expectancy",
         "position_sharpe",
         "position_sortino",
+        "max_depth_episode",
+        "max_duration_episode",
     ]
 
     if is_open_only:
@@ -369,9 +449,12 @@ def _compute_realized_metrics(
             "expectancy": None,
             "position_sharpe": None,
             "position_sortino": None,
+            "max_depth_episode": None,
+            "max_duration_episode": None,
             "unavailable_reasons": unavailable_reasons,
         }
 
+    pnls = [pnl for _, pnl in closed_positions]
     n = len(pnls)
     if n == 0:
         for key in metric_keys:
@@ -388,6 +471,8 @@ def _compute_realized_metrics(
             "expectancy": None,
             "position_sharpe": None,
             "position_sortino": None,
+            "max_depth_episode": None,
+            "max_duration_episode": None,
             "unavailable_reasons": unavailable_reasons,
         }
 
@@ -439,6 +524,12 @@ def _compute_realized_metrics(
     else:
         position_sortino = expectancy / downside_dev
 
+    max_depth_ep, max_dur_ep = _compute_drawdown_episodes(closed_positions)
+    if max_depth_ep is None:
+        unavailable_reasons["max_depth_episode"] = "no_drawdown"
+    if max_dur_ep is None:
+        unavailable_reasons["max_duration_episode"] = "no_drawdown"
+
     return {
         "total_sample": n,
         "excluded_open_count": excluded_open_count,
@@ -451,6 +542,8 @@ def _compute_realized_metrics(
         "expectancy": expectancy,
         "position_sharpe": position_sharpe,
         "position_sortino": position_sortino,
+        "max_depth_episode": max_depth_ep,
+        "max_duration_episode": max_dur_ep,
         "unavailable_reasons": unavailable_reasons,
     }
 

@@ -325,3 +325,180 @@ class MetricsApiTests(unittest.TestCase):
         res3 = self._request("/api/metrics?strategy=%20%20")
         self.assertEqual(res3.status_code, 422)
         self.assertEqual(res3.json()["detail"]["code"], "invalid_filter")
+
+    def test_metrics_drawdown_recovered_and_distinct_depth_duration_episodes(self) -> None:
+        """Endpoint distinguishes max depth episode from max duration episode."""
+        with self._projection() as connection:
+            self._seed_import(connection, 1)
+            insert_positions(
+                connection,
+                [
+                    # Day 1: +100 (Peak = 100 at 2026-08-01T10:00:00Z)
+                    (
+                        "1", "Turtle", "WIN", "WINQ26", "buy", "2026-08-01T09:00:00Z",
+                        "2026-08-01T10:00:00Z", "closed", 1, 1, 100, 110, 0, 0, 100.0, 1, 1,
+                    ),
+                    # Day 2: -200 (Trough = -100, Depth = 200 at 2026-08-02T10:00:00Z)
+                    (
+                        "2", "Turtle", "WIN", "WINQ26", "buy", "2026-08-02T09:00:00Z",
+                        "2026-08-02T10:00:00Z", "closed", 1, 1, 100, 90, 0, 0, -200.0, 1, 1,
+                    ),
+                    # Day 3: +250 (Cum = 150 -> Recovered at 2026-08-03T10:00:00Z, dur = 2 days)
+                    # New Peak = 150 at 2026-08-03T10:00:00Z
+                    (
+                        "3", "Turtle", "WIN", "WINQ26", "buy", "2026-08-03T09:00:00Z",
+                        "2026-08-03T10:00:00Z", "closed", 1, 1, 100, 125, 0, 0, 250.0, 1, 1,
+                    ),
+                    # Day 5: -50 (Cum = 100, Trough = 100, Depth = 50 at 2026-08-05T10:00:00Z)
+                    (
+                        "4", "Turtle", "WIN", "WINQ26", "buy", "2026-08-05T09:00:00Z",
+                        "2026-08-05T10:00:00Z", "closed", 1, 1, 100, 95, 0, 0, -50.0, 1, 1,
+                    ),
+                    # Day 9: +60 (Cum = 160 -> Recovered at 2026-08-09T10:00:00Z, dur = 6 days)
+                    (
+                        "5", "Turtle", "WIN", "WINQ26", "buy", "2026-08-09T09:00:00Z",
+                        "2026-08-09T10:00:00Z", "closed", 1, 1, 100, 106, 0, 0, 60.0, 1, 1,
+                    ),
+                ],
+            )
+
+        response = self._request("/api/metrics")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        # Episode 1: Peak at 2026-08-01T10:00:00+00:00 (value 100), Trough -100, Rec 2026-08-03
+        # Depth = 200, Duration = 2 days
+        max_depth = data["max_depth_episode"]
+        self.assertIsNotNone(max_depth)
+        self.assertAlmostEqual(max_depth["depth"], 200.0)
+        self.assertEqual(max_depth["peak_at"], "2026-08-01T10:00:00+00:00")
+        self.assertAlmostEqual(max_depth["peak_value"], 100.0)
+        self.assertEqual(max_depth["trough_at"], "2026-08-02T10:00:00+00:00")
+        self.assertAlmostEqual(max_depth["trough_value"], -100.0)
+        self.assertEqual(max_depth["recovery_at"], "2026-08-03T10:00:00+00:00")
+        self.assertAlmostEqual(max_depth["duration_days"], 2.0)
+
+        # Episode 2: Peak at 2026-08-03T10:00:00+00:00 (value 150), Trough 100, Rec 2026-08-09
+        # Depth = 50, Duration = 6 days
+        max_dur = data["max_duration_episode"]
+        self.assertIsNotNone(max_dur)
+        self.assertAlmostEqual(max_dur["depth"], 50.0)
+        self.assertEqual(max_dur["peak_at"], "2026-08-03T10:00:00+00:00")
+        self.assertAlmostEqual(max_dur["peak_value"], 150.0)
+        self.assertEqual(max_dur["trough_at"], "2026-08-05T10:00:00+00:00")
+        self.assertAlmostEqual(max_dur["trough_value"], 100.0)
+        self.assertEqual(max_dur["recovery_at"], "2026-08-09T10:00:00+00:00")
+        self.assertAlmostEqual(max_dur["duration_days"], 6.0)
+
+    def test_metrics_drawdown_unrecovered_measures_duration_to_sample_end(self) -> None:
+        """Unrecovered drawdown returns recovery_at null and duration to sample end."""
+        with self._projection() as connection:
+            self._seed_import(connection, 1)
+            insert_positions(
+                connection,
+                [
+                    # Peak at 2026-08-01 (+100)
+                    (
+                        "1", "Turtle", "WIN", "WINQ26", "buy", "2026-08-01T10:00:00Z",
+                        "2026-08-01T12:00:00Z", "closed", 1, 1, 100, 110, 0, 0, 100.0, 1, 1,
+                    ),
+                    # Drop at 2026-08-03 (-80, Cum = 20)
+                    (
+                        "2", "Turtle", "WIN", "WINQ26", "buy", "2026-08-03T10:00:00Z",
+                        "2026-08-03T12:00:00Z", "closed", 1, 1, 100, 92, 0, 0, -80.0, 1, 1,
+                    ),
+                    # Last sample position at 2026-08-06 (+10, Cum = 30 < 100)
+                    (
+                        "3", "Turtle", "WIN", "WINQ26", "buy", "2026-08-06T10:00:00Z",
+                        "2026-08-06T12:00:00Z", "closed", 1, 1, 100, 101, 0, 0, 10.0, 1, 1,
+                    ),
+                ],
+            )
+
+        response = self._request("/api/metrics")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        max_depth = data["max_depth_episode"]
+        self.assertIsNotNone(max_depth)
+        self.assertAlmostEqual(max_depth["depth"], 80.0)
+        self.assertEqual(max_depth["peak_at"], "2026-08-01T12:00:00+00:00")
+        self.assertAlmostEqual(max_depth["peak_value"], 100.0)
+        self.assertEqual(max_depth["trough_at"], "2026-08-03T12:00:00+00:00")
+        self.assertAlmostEqual(max_depth["trough_value"], 20.0)
+        self.assertIsNone(max_depth["recovery_at"])
+        # From 2026-08-01T12:00:00Z to 2026-08-06T12:00:00Z = 5 days
+        self.assertAlmostEqual(max_depth["duration_days"], 5.0)
+
+    def test_metrics_drawdown_aggregates_tied_exit_timestamps(self) -> None:
+        """Positions closed at the exact same timestamp are aggregated before curve updates."""
+        with self._projection() as connection:
+            self._seed_import(connection, 1)
+            insert_positions(
+                connection,
+                [
+                    # Base peak: +100
+                    (
+                        "1", "Turtle", "WIN", "WINQ26", "buy", "2026-08-01T10:00:00Z",
+                        "2026-08-01T12:00:00Z", "closed", 1, 1, 100, 110, 0, 0, 100.0, 1, 1,
+                    ),
+                    # Two positions tied at 2026-08-02T12:00:00Z: -30 and -20 -> net -50
+                    (
+                        "2", "Turtle", "WIN", "WINQ26", "buy", "2026-08-02T10:00:00Z",
+                        "2026-08-02T12:00:00Z", "closed", 1, 1, 100, 97, 0, 0, -30.0, 1, 1,
+                    ),
+                    (
+                        "3", "Turtle", "WIN", "WINQ26", "sell", "2026-08-02T10:00:00Z",
+                        "2026-08-02T12:00:00Z", "closed", 1, 1, 100, 98, 0, 0, -20.0, 1, 1,
+                    ),
+                    # Recovery at 2026-08-04T12:00:00Z: +60 (Cum = 110)
+                    (
+                        "4", "Turtle", "WIN", "WINQ26", "buy", "2026-08-04T10:00:00Z",
+                        "2026-08-04T12:00:00Z", "closed", 1, 1, 100, 106, 0, 0, 60.0, 1, 1,
+                    ),
+                ],
+            )
+
+        response = self._request("/api/metrics")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        max_depth = data["max_depth_episode"]
+        self.assertIsNotNone(max_depth)
+        self.assertAlmostEqual(max_depth["depth"], 50.0)
+        self.assertEqual(max_depth["peak_at"], "2026-08-01T12:00:00+00:00")
+        self.assertEqual(max_depth["trough_at"], "2026-08-02T12:00:00+00:00")
+        self.assertAlmostEqual(max_depth["trough_value"], 50.0)
+        self.assertEqual(max_depth["recovery_at"], "2026-08-04T12:00:00+00:00")
+        self.assertAlmostEqual(max_depth["duration_days"], 3.0)
+
+    def test_metrics_no_drawdown_reports_unavailable_reason(self) -> None:
+        """Monotonically non-decreasing curve produces no drawdown episodes with explicit reason."""
+        with self._projection() as connection:
+            self._seed_import(connection, 1)
+            insert_positions(
+                connection,
+                [
+                    (
+                        "1", "Turtle", "WIN", "WINQ26", "buy", "2026-08-01T10:00:00Z",
+                        "2026-08-01T12:00:00Z", "closed", 1, 1, 100, 110, 0, 0, 100.0, 1, 1,
+                    ),
+                    (
+                        "2", "Turtle", "WIN", "WINQ26", "buy", "2026-08-02T10:00:00Z",
+                        "2026-08-02T12:00:00Z", "closed", 1, 1, 100, 105, 0, 0, 50.0, 1, 1,
+                    ),
+                ],
+            )
+
+        response = self._request("/api/metrics")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertIsNone(data["max_depth_episode"])
+        self.assertIsNone(data["max_duration_episode"])
+        self.assertEqual(
+            data["unavailable_reasons"]["max_depth_episode"], "no_drawdown"
+        )
+        self.assertEqual(
+            data["unavailable_reasons"]["max_duration_episode"], "no_drawdown"
+        )

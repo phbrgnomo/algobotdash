@@ -105,6 +105,10 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="metric-expectancy"', content)
         self.assertIn('id="metric-position-sharpe"', content)
         self.assertIn('id="metric-position-sortino"', content)
+        self.assertIn('id="metric-max-depth-depth"', content)
+        self.assertIn('id="metric-max-depth-duration"', content)
+        self.assertIn('id="metric-max-duration-depth"', content)
+        self.assertIn('id="metric-max-duration-duration"', content)
         self.assertIn('id="metric-total-sample"', content)
         self.assertIn('id="metric-excluded-open"', content)
         self.assertIn("Projeção indisponível.", content)
@@ -127,10 +131,12 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
   "metrics-state", "metric-net-pnl", "metric-gross-profit", "metric-gross-loss",
   "metric-win-rate", "metric-profit-factor", "metric-payoff", "metric-expectancy",
-  "metric-position-sharpe", "metric-position-sortino", "metric-total-sample",
-  "metric-excluded-open", "positions-body", "page-summary", "previous-page", "next-page",
-  "sort-by", "sort-order", "filter-strategy", "filter-symbol-family", "filter-direction",
-  "filter-status", "filter-association", "date-from", "date-to"];
+  "metric-position-sharpe", "metric-position-sortino", "metric-max-depth-depth",
+  "metric-max-depth-duration", "metric-max-duration-depth", "metric-max-duration-duration",
+  "metric-total-sample", "metric-excluded-open", "positions-body", "page-summary",
+  "previous-page", "next-page", "sort-by", "sort-order", "filter-strategy",
+  "filter-symbol-family", "filter-direction", "filter-status", "filter-association",
+  "date-from", "date-to"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -258,10 +264,12 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
   "metrics-state", "metric-net-pnl", "metric-gross-profit", "metric-gross-loss",
   "metric-win-rate", "metric-profit-factor", "metric-payoff", "metric-expectancy",
-  "metric-position-sharpe", "metric-position-sortino", "metric-total-sample",
-  "metric-excluded-open", "positions-body", "page-summary", "previous-page", "next-page",
-  "sort-by", "sort-order", "filter-strategy", "filter-symbol-family", "filter-direction",
-  "filter-status", "filter-association", "date-from", "date-to"];
+  "metric-position-sharpe", "metric-position-sortino", "metric-max-depth-depth",
+  "metric-max-depth-duration", "metric-max-duration-depth", "metric-max-duration-duration",
+  "metric-total-sample", "metric-excluded-open", "positions-body", "page-summary",
+  "previous-page", "next-page", "sort-by", "sort-order", "filter-strategy",
+  "filter-symbol-family", "filter-direction", "filter-status", "filter-association",
+  "date-from", "date-to"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
