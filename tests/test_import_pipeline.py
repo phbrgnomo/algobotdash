@@ -264,6 +264,26 @@ class ImportPipelineTests(unittest.TestCase):
         self.assertIsNone(positions[0].strategy)
         self.assertTrue(positions[0].is_associated)
 
+    def test_refresh_persists_matching_unclassified_order_as_associated(self) -> None:
+        """Persist proven association independently from strategy classification."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "algobotdash.sqlite"
+        workbook(source, legacy_report=True)
+        book = load_workbook(source)
+        sheet = book.active
+        if sheet is None:
+            raise RuntimeError("workbook fixture has no active worksheet")
+        sheet["L8"] = "manual order"
+        book.save(source)
+
+        ImportService(config(source)).refresh(database)
+
+        with sqlite3.connect(database) as connection:
+            persisted = connection.execute(
+                "select strategy, is_associated from positions where position_id = '1001'"
+            ).fetchone()
+        self.assertEqual(persisted, (None, 1))
+
 
     def test_configuration_uses_longest_symbol_prefix(self) -> None:
         """Configuration should prefer the most specific symbol prefix."""

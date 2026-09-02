@@ -15,7 +15,8 @@
       #error, #filter-state, #table-state { margin-top: 16px; color: #ffb4ba; }
       .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
       .controls, .filters, .pagination { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
-      .filters { border-top: 1px solid #34414a; margin-top: 16px; padding-top: 16px; }
+      .filters { border: 0; border-top: 1px solid #34414a; margin-top: 16px; padding: 16px 0 0; }
+      .filters legend { color: #9eabb4; padding: 0 8px 0 0; }
       .filters label { color: #9eabb4; font-size: 14px; }
       button, input, select { background: #24323b; border: 1px solid #50616c; border-radius: 4px; color: inherit; padding: 7px 10px; }
       button:disabled { cursor: not-allowed; opacity: .5; }
@@ -67,7 +68,8 @@
             </select>
           </div>
         </div>
-        <div class="filters" aria-label="Filtros das posições">
+        <fieldset class="filters">
+          <legend>Filtros das posições</legend>
           <label for="filter-strategy">Estratégia</label>
           <select id="filter-strategy"><option value="">Todas</option></select>
           <label for="filter-symbol-family">Símbolo</label>
@@ -86,9 +88,9 @@
           </select>
           <label for="date-from">De</label><input id="date-from" type="date">
           <label for="date-to">Até</label><input id="date-to" type="date">
-        </div>
-        <p id="filter-state" hidden></p>
-        <p id="table-state" hidden></p>
+        </fieldset>
+        <p id="filter-state" aria-live="polite" hidden></p>
+        <p id="table-state" role="alert" hidden></p>
         <div class="table-wrap">
           <table>
             <thead>
@@ -187,6 +189,10 @@
 
       async function loadPositions() {
         const requestGeneration = ++positionRequestGeneration;
+        if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+          setNotice("#table-state", "Atenção: a data inicial deve ser anterior ou igual à data final.", true);
+          return "handled";
+        }
         const query = new URLSearchParams({limit: page.limit, offset: page.offset,
           sort_by: sortBy.value, sort_order: sortOrder.value});
         [["strategy", filterStrategy.value], ["symbol_family", filterSymbolFamily.value],
@@ -197,7 +203,22 @@
         });
         try {
           const response = await fetch(`/api/positions?${query}`, {cache: "no-store"});
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          if (!response.ok) {
+            let code = null;
+            try {
+              const payload = await response.json();
+              code = payload.detail?.code || null;
+            } catch (_error) {
+              // A response body is optional; the HTTP status remains useful.
+            }
+            const messages = {
+              invalid_date_range: "A data inicial deve ser anterior ou igual à data final.",
+              contradictory_filters: "Uma estratégia não pode ser combinada com posições não associadas.",
+            };
+            const error = new Error(messages[code] || `HTTP ${response.status}`);
+            error.retryable = response.status === undefined || response.status >= 500;
+            throw error;
+          }
           const data = await response.json();
           if (requestGeneration !== positionRequestGeneration) return false;
           renderPositions(data);
@@ -209,8 +230,11 @@
           setNotice("#table-state", `Atenção: não foi possível consultar posições (${error.message}).`, true);
           document.querySelector("#previous-page").disabled = true;
           document.querySelector("#next-page").disabled = true;
-          latestImportKey = null;
-          return false;
+          if (error.retryable !== false) {
+            latestImportKey = null;
+            return false;
+          }
+          return "handled";
         }
       }
 
@@ -270,15 +294,19 @@
               page.offset = 0;
               const loaded = await loadPositions();
               if (requestGeneration !== statusRequestGeneration) return;
-              if (loaded) latestImportKey = importKey;
+              if (loaded === true || loaded === "handled") latestImportKey = importKey;
             }
           }
           if (data.state === "empty") {
+            positionRequestGeneration += 1;
+            filterRequestGeneration += 1;
             latestImportKey = null;
             latestFilterImportKey = null;
             renderPositions({items: [], total: 0});
           }
           if (data.state === "unavailable") {
+            positionRequestGeneration += 1;
+            filterRequestGeneration += 1;
             latestImportKey = null;
             latestFilterImportKey = null;
             document.querySelector("#positions-body").replaceChildren();
@@ -297,7 +325,17 @@
       sortOrder.addEventListener("change", () => { page.offset = 0; loadPositions(); });
       [filterStrategy, filterSymbolFamily, filterDirection, filterStatus,
         filterAssociation, dateFrom, dateTo].forEach((control) => {
-        control.addEventListener("change", () => { page.offset = 0; loadPositions(); });
+        control.addEventListener("change", () => {
+          if (control === filterAssociation && filterAssociation.value === "unassociated") {
+            filterStrategy.value = "";
+          }
+          if (control === filterStrategy && filterStrategy.value
+              && filterAssociation.value === "unassociated") {
+            filterAssociation.value = "all";
+          }
+          page.offset = 0;
+          loadPositions();
+        });
       });
       document.querySelector("#previous-page").addEventListener("click", () => {
         page.offset = Math.max(0, page.offset - page.limit); loadPositions();

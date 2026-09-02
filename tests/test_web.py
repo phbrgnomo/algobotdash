@@ -90,7 +90,132 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="positions-body"', content)
         self.assertIn('id="previous-page"', content)
         self.assertIn('id="next-page"', content)
+        self.assertIn('<fieldset class="filters">', content)
+        self.assertIn('<legend>Filtros das posições</legend>', content)
+        self.assertIn('id="filter-state" aria-live="polite"', content)
+        self.assertIn('id="table-state" role="alert"', content)
         self.assertIn("Projeção indisponível.", content)
+
+    @unittest.skipUnless(NODE_EXECUTABLE, "requires Node.js for JavaScript execution")
+    def test_dashboard_invalidates_pending_queries_and_validates_filters(self) -> None:
+        """Terminal status and invalid filters must not leak stale dashboard state."""
+        runner = r"""
+const fs = require("fs");
+const vm = require("vm");
+const html = fs.readFileSync(process.env.DASHBOARD_PATH, "utf8");
+const source = html.match(/<script>([\s\S]*)<\/script>/)[1];
+class Element {
+  constructor() { this.value = ""; this.listeners = {}; this.children = []; }
+  replaceChildren(...children) { this.children = children; }
+  append(child) { this.children.push(child); }
+  addEventListener(name, handler) { this.listeners[name] = handler; }
+}
+const ids = ["service", "configuration", "source", "projection", "source-name",
+  "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
+  "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
+  "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
+  "filter-association", "date-from", "date-to"];
+const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
+elements["#sort-by"].value = "closed_at";
+elements["#sort-order"].value = "desc";
+elements["#filter-status"].value = "closed";
+elements["#filter-association"].value = "all";
+let interval;
+let state = "ready";
+let positionFetches = 0;
+let positionMode = "normal";
+let filterMode = "normal";
+const pendingPositions = [];
+const pendingFilters = [];
+const statusPayload = () => ({state, configuration: "valid", source: "available",
+  projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
+  last_import: state === "ready" ? {source_hash: "hash", imported_at: "2026-08-01T00:00:00Z"} : null});
+const context = {
+  document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
+  fetch: async (url) => {
+    if (url === "/api/status") return {ok: true, status: 200, json: async () => statusPayload()};
+    if (url === "/api/filter-options") {
+      if (filterMode === "pending") return new Promise((resolve) => pendingFilters.push(resolve));
+      return {ok: true, status: 200, json: async () => ({strategies: ["Turtle"], symbol_families: ["WIN"]})};
+    }
+    positionFetches += 1;
+    if (positionMode === "pending") return new Promise((resolve) => pendingPositions.push(resolve));
+    if (positionMode === "validation") return {ok: false, status: 422,
+      json: async () => ({detail: {code: "contradictory_filters"}})};
+    return {ok: true, status: 200, json: async () => ({items: [], total: 0})};
+  },
+  setInterval: (callback) => { interval = callback; return 1; },
+  URLSearchParams, Intl, Date, console,
+};
+vm.runInNewContext(source + "\nglobalThis.loadPositions = loadPositions; globalThis.loadFilterOptions = loadFilterOptions;", context);
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+const watchdog = setTimeout(() => {
+  console.error("dashboard regression test did not complete");
+  process.exitCode = 1;
+}, 2000);
+(async () => {
+  await flush(); await flush();
+
+  positionMode = "pending";
+  context.loadPositions();
+  filterMode = "pending";
+  context.loadFilterOptions();
+  state = "unavailable";
+  await interval();
+  pendingPositions[0]({ok: true, status: 200, json: async () => ({items: [{position_id: "stale",
+    strategy: "Turtle", association: "associated", symbol_family: "WIN", direction: "buy",
+    opened_at: null, closed_at: null, status: "closed", realized_pnl: 1}], total: 1})});
+  pendingFilters[0]({ok: true, status: 200, json: async () => ({strategies: ["Stale"], symbol_families: ["OLD"]})});
+  await flush(); await flush();
+  if (elements["#page-summary"].textContent !== "Projeção indisponível.") throw new Error("stale position escaped terminal state");
+  if (elements["#filter-strategy"].children.some((option) => option.value === "Stale")) throw new Error("stale filter catalog escaped terminal state");
+
+  positionMode = "normal";
+  elements["#date-from"].value = "2026-08-03";
+  elements["#date-to"].value = "2026-08-01";
+  const beforeInvalidDates = positionFetches;
+  elements["#date-from"].listeners.change();
+  await flush();
+  if (positionFetches !== beforeInvalidDates) throw new Error("invalid dates reached API");
+  if (!elements["#table-state"].textContent.includes("data inicial")) throw new Error("missing date validation detail");
+
+  elements["#date-from"].value = "";
+  elements["#date-to"].value = "";
+  elements["#filter-strategy"].value = "Turtle";
+  elements["#filter-association"].value = "unassociated";
+  elements["#filter-association"].listeners.change();
+  await flush();
+  if (elements["#filter-strategy"].value !== "") throw new Error("contradictory strategy was not cleared");
+
+  elements["#filter-strategy"].value = "Turtle";
+  elements["#filter-strategy"].listeners.change();
+  await flush();
+  if (elements["#filter-association"].value !== "all") throw new Error("association was not normalized");
+
+  positionMode = "validation";
+  filterMode = "normal";
+  const before422 = positionFetches;
+  state = "ready";
+  await interval();
+  if (!elements["#table-state"].textContent.includes("não associadas")) throw new Error("API detail was not exposed");
+  if (positionFetches !== before422 + 1) throw new Error("expected one recovery validation request");
+  await interval();
+  if (positionFetches !== before422 + 1) throw new Error("HTTP 422 caused polling retry");
+  clearTimeout(watchdog);
+})().catch((error) => { clearTimeout(watchdog); console.error(error); process.exitCode = 1; });
+"""
+        node_executable = NODE_EXECUTABLE
+        if node_executable is None:
+            self.skipTest("requires Node.js for JavaScript execution")
+        result = subprocess.run(  # nosec B603 -- absolute executable and fixed test script
+            [node_executable, "-e", runner],
+            check=False,
+            capture_output=True,
+            env={"DASHBOARD_PATH": str(Path(dashboard().path))},
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(NODE_EXECUTABLE, "requires Node.js for JavaScript execution")
     def test_dashboard_recovers_positions_when_projection_returns_with_same_hash(self) -> None:

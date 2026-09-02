@@ -162,6 +162,39 @@ class QueryApiTests(unittest.TestCase):
         )
         self.assertEqual(unassociated.json()["items"][0]["association"], "unassociated")
 
+    def test_each_shared_filter_is_independently_effective(self) -> None:
+        """Prove every dimension against rows that differ on the other dimensions."""
+        self._seed_projection()
+
+        cases = {
+            "strategy": ("/api/positions?status=all&strategy=Turtle", ["100"]),
+            "strategy_outer_whitespace": (
+                "/api/positions?status=all&strategy=%20Turtle%20", ["100"]
+            ),
+            "strategy_case_sensitive": (
+                "/api/positions?status=all&strategy=turtle", []
+            ),
+            "symbol_family": ("/api/positions?status=all&symbol_family=WDO", ["200"]),
+            "symbol_family_missing": (
+                "/api/positions?status=all&symbol_family=IND", []
+            ),
+            "direction": ("/api/positions?status=all&direction=sell", ["200"]),
+            "associated": (
+                "/api/positions?status=all&association=associated", ["300", "100"]
+            ),
+            "unassociated": (
+                "/api/positions?status=all&association=unassociated", ["200"]
+            ),
+        }
+        for name, (path, expected) in cases.items():
+            with self.subTest(name=name):
+                response = self._request(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    [item["position_id"] for item in response.json()["items"]],
+                    expected,
+                )
+
     def test_position_dates_use_bahia_day_and_status_specific_timestamp(self) -> None:
         """Use exit day for closed positions and entry day for open positions."""
         self._seed_projection()
@@ -204,6 +237,11 @@ class QueryApiTests(unittest.TestCase):
         injection = self._request(
             "/api/positions?status=all&strategy=Turtle%27%20OR%201%3D1%20--"
         )
+        invalid_enum_paths = (
+            "/api/positions?direction=sideways",
+            "/api/positions?status=finished",
+            "/api/positions?association=maybe",
+        )
 
         self.assertEqual(inverted.status_code, 422)
         self.assertEqual(inverted.json()["detail"]["code"], "invalid_date_range")
@@ -216,6 +254,9 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(unknown.json()["total"], 0)
         self.assertEqual(injection.status_code, 200)
         self.assertEqual(injection.json()["total"], 0)
+        for path in invalid_enum_paths:
+            with self.subTest(path=path):
+                self.assertEqual(self._request(path).status_code, 422)
 
     def test_filter_options_are_observed_distinct_and_sorted(self) -> None:
         """Return one deterministic catalog built from the current projection."""

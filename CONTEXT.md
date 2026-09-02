@@ -37,8 +37,8 @@ Resultado consolidado pela soma do P&L das execuções associadas ao ciclo, cons
 _Avoid_: lucro copiado sem reconciliação da posição
 
 **Histórico de importações**:
-Registro permanente das atualizações válidas, incluindo a identificação da fonte, seu hash, horário e indicadores de qualidade.
-_Avoid_: parte descartável da projeção
+Registro das atualizações válidas, incluindo a identificação da fonte, seu hash, horário e indicadores de qualidade. Persiste entre refreshes compatíveis; durante o pré-MVP pode ser reiniciado quando uma alteração estrutural exigir a reconstrução integral da projeção.
+_Avoid_: dado externo à projeção, histórico imutável durante o pré-MVP
 
 **Confiança do vínculo**:
 Grau de evidência de que uma ordem ou execução pertence a um ciclo, determinado por sinais concordantes do relatório; vínculos ambíguos permanecem não associados.
