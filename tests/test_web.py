@@ -218,8 +218,8 @@ const watchdog = setTimeout(() => {
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(NODE_EXECUTABLE, "requires Node.js for JavaScript execution")
-    def test_dashboard_recovers_positions_when_projection_returns_with_same_hash(self) -> None:
-        """Reload positions after unavailable state even when source hash is unchanged."""
+    def test_dashboard_synchronizes_filters_pagination_and_async_recovery(self) -> None:
+        """Keep filters, pagination, and async recovery in one dashboard state."""
         runner = r"""
 const fs = require("fs");
 const vm = require("vm");
@@ -272,7 +272,7 @@ const context = {
     if (mode === "retry" && positionFetches === 1) return {ok: false, json: async () => ({})};
     if (mode === "failure") return {ok: false, json: async () => ({})};
     if (mode === "race") return new Promise((resolve) => pending.push(resolve));
-    return {ok: true, json: async () => ({items: [], total: 0})};
+    return {ok: true, json: async () => ({items: [], total: 120})};
   },
   setInterval: (callback) => { interval = callback; return 1; },
   URLSearchParams, Intl, Date, console,
@@ -298,6 +298,9 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await interval();
   if (filterFetches !== 3) throw new Error(`expected filter retry, got ${filterFetches}`);
   if (positionFetches !== 4) throw new Error(`expected reload after filter recovery, got ${positionFetches}`);
+  elements["#next-page"].listeners.click();
+  await flush();
+  if (!lastPositionUrl.includes("offset=50")) throw new Error(`pagination did not advance: ${lastPositionUrl}`);
   elements["#filter-strategy"].value = "FVG";
   elements["#filter-symbol-family"].value = "WIN";
   elements["#filter-direction"].value = "buy";
@@ -307,7 +310,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   elements["#filter-strategy"].listeners.change();
   await flush();
   for (const token of ["strategy=FVG", "symbol_family=WIN", "direction=buy",
-    "association=associated", "date_from=2026-08-01", "date_to=2026-08-31"]) {
+    "association=associated", "date_from=2026-08-01", "date_to=2026-08-31", "offset=0"]) {
     if (!lastPositionUrl.includes(token)) throw new Error(`missing filter ${token}: ${lastPositionUrl}`);
   }
   if (elements["#table-state"].hidden !== true || elements["#table-state"].textContent !== "") throw new Error("stale unavailable notice");
@@ -316,7 +319,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await flush();
   mode = "normal";
   await interval();
-  if (positionFetches !== 7) throw new Error(`expected retry after active position failure, got ${positionFetches}`);
+  if (positionFetches !== 8) throw new Error(`expected retry after active position failure, got ${positionFetches}`);
   if (elements["#filter-strategy"].value !== "FVG") throw new Error("valid strategy selection was lost");
   mode = "race";
   elements["#sort-by"].value = "opened_at";
