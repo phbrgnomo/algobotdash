@@ -37,8 +37,8 @@ Resultado consolidado pela soma do P&L das execuções associadas ao ciclo, cons
 _Avoid_: lucro copiado sem reconciliação da posição
 
 **Histórico de importações**:
-Registro permanente das atualizações válidas, incluindo a identificação da fonte, seu hash, horário e indicadores de qualidade.
-_Avoid_: parte descartável da projeção
+Registro das atualizações válidas, incluindo a identificação da fonte, seu hash, horário e indicadores de qualidade. Persiste entre refreshes compatíveis; durante o pré-MVP pode ser reiniciado quando uma alteração estrutural exigir a reconstrução integral da projeção.
+_Avoid_: dado externo à projeção, histórico imutável durante o pré-MVP
 
 **Confiança do vínculo**:
 Grau de evidência de que uma ordem ou execução pertence a um ciclo, determinado por sinais concordantes do relatório; vínculos ambíguos permanecem não associados.
@@ -73,6 +73,10 @@ _Avoid_: capital informado manualmente, saldo após incorporar operações do di
 **Posição analítica**:
 Unidade de análise do MVP, identificada pelo registro de posição; é classificada pela ordem correspondente quando `position_id` e `symbol_raw` coincidem e a ordem possui uma estratégia. Ciclos de piramidação não são inferidos nesta versão.
 _Avoid_: ciclo implícito, agrupamento por proximidade
+
+**Associação de posição**:
+Vínculo comprovado quando `position_id` e `symbol_raw` coincidem com o ticket e o símbolo bruto de uma ordem. A associação pode existir sem estratégia classificada; `strategy` nula não significa, sozinha, posição não associada.
+_Avoid_: inferir associação pela presença ou ausência de estratégia
 
 **Ordem**:
 Registro individual de intenção/estado do relatório, preservado como detalhe de rastreabilidade da posição quando houver vínculo explícito.

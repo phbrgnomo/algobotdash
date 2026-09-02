@@ -12,10 +12,13 @@
       dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
       dt, small { color: #9eabb4; } dd { margin: 0; overflow-wrap: anywhere; }
       .ok { color: #59d69b; } .warn { color: #f5c15d; } .error { color: #ff7b86; }
-      #error, #table-state { margin-top: 16px; color: #ffb4ba; }
+      #error, #filter-state, #table-state { margin-top: 16px; color: #ffb4ba; }
       .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
-      .controls, .pagination { align-items: center; display: flex; gap: 8px; }
-      button, select { background: #24323b; border: 1px solid #50616c; border-radius: 4px; color: inherit; padding: 7px 10px; }
+      .controls, .filters, .pagination { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+      .filters { border: 0; border-top: 1px solid #34414a; margin-top: 16px; padding: 16px 0 0; }
+      .filters legend { color: #9eabb4; padding: 0 8px 0 0; }
+      .filters label { color: #9eabb4; font-size: 14px; }
+      button, input, select { background: #24323b; border: 1px solid #50616c; border-radius: 4px; color: inherit; padding: 7px 10px; }
       button:disabled { cursor: not-allowed; opacity: .5; }
       .table-wrap { overflow-x: auto; }
       table { border-collapse: collapse; margin-top: 16px; min-width: 900px; width: 100%; }
@@ -65,7 +68,29 @@
             </select>
           </div>
         </div>
-        <p id="table-state" hidden></p>
+        <fieldset class="filters">
+          <legend>Filtros das posições</legend>
+          <label for="filter-strategy">Estratégia</label>
+          <select id="filter-strategy"><option value="">Todas</option></select>
+          <label for="filter-symbol-family">Símbolo</label>
+          <select id="filter-symbol-family"><option value="">Todos</option></select>
+          <label for="filter-direction">Direção</label>
+          <select id="filter-direction">
+            <option value="">Todas</option><option value="buy">Compra</option><option value="sell">Venda</option>
+          </select>
+          <label for="filter-status">Status</label>
+          <select id="filter-status">
+            <option value="closed" selected>Realizadas</option><option value="open">Abertas</option><option value="all">Todas</option>
+          </select>
+          <label for="filter-association">Associação</label>
+          <select id="filter-association">
+            <option value="all" selected>Todas</option><option value="associated">Associadas</option><option value="unassociated">Não associadas</option>
+          </select>
+          <label for="date-from">De</label><input id="date-from" type="date">
+          <label for="date-to">Até</label><input id="date-to" type="date">
+        </fieldset>
+        <p id="filter-state" aria-live="polite" hidden></p>
+        <p id="table-state" role="alert" hidden></p>
         <div class="table-wrap">
           <table>
             <thead>
@@ -87,9 +112,18 @@
       const page = {limit: 50, offset: 0, total: 0};
       const sortBy = document.querySelector("#sort-by");
       const sortOrder = document.querySelector("#sort-order");
+      const filterStrategy = document.querySelector("#filter-strategy");
+      const filterSymbolFamily = document.querySelector("#filter-symbol-family");
+      const filterDirection = document.querySelector("#filter-direction");
+      const filterStatus = document.querySelector("#filter-status");
+      const filterAssociation = document.querySelector("#filter-association");
+      const dateFrom = document.querySelector("#date-from");
+      const dateTo = document.querySelector("#date-to");
       let latestImportKey = null;
+      let latestFilterImportKey = null;
       let positionRequestGeneration = 0;
       let statusRequestGeneration = 0;
+      let filterRequestGeneration = 0;
 
       function label(value) {
         return {valid: "válida", invalid: "inválida", available: "disponível",
@@ -131,7 +165,9 @@
         const body = document.querySelector("#positions-body");
         body.replaceChildren(...data.items.map((position) => {
           const row = document.createElement("tr");
-          [position.position_id, position.strategy || "Não associada", position.symbol_family || "—",
+          const strategyLabel = position.association === "associated"
+            ? position.strategy || "Sem estratégia" : "Não associada";
+          [position.position_id, strategyLabel, position.symbol_family || "—",
             position.direction, formatDate(position.opened_at), formatDate(position.closed_at),
             position.status, formatPnl(position.realized_pnl)].forEach((value, index) => {
             const cell = document.createElement("td");
@@ -153,11 +189,36 @@
 
       async function loadPositions() {
         const requestGeneration = ++positionRequestGeneration;
+        if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+          setNotice("#table-state", "Atenção: a data inicial deve ser anterior ou igual à data final.", true);
+          return "handled";
+        }
         const query = new URLSearchParams({limit: page.limit, offset: page.offset,
           sort_by: sortBy.value, sort_order: sortOrder.value});
+        [["strategy", filterStrategy.value], ["symbol_family", filterSymbolFamily.value],
+          ["direction", filterDirection.value], ["status", filterStatus.value],
+          ["association", filterAssociation.value === "all" ? "" : filterAssociation.value],
+          ["date_from", dateFrom.value], ["date_to", dateTo.value]].forEach(([name, value]) => {
+          if (value) query.set(name, value);
+        });
         try {
           const response = await fetch(`/api/positions?${query}`, {cache: "no-store"});
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          if (!response.ok) {
+            let code = null;
+            try {
+              const payload = await response.json();
+              code = payload.detail?.code || null;
+            } catch (_error) {
+              // A response body is optional; the HTTP status remains useful.
+            }
+            const messages = {
+              invalid_date_range: "A data inicial deve ser anterior ou igual à data final.",
+              contradictory_filters: "Uma estratégia não pode ser combinada com posições não associadas.",
+            };
+            const error = new Error(messages[code] || `HTTP ${response.status}`);
+            error.retryable = response.status === undefined || response.status >= 500;
+            throw error;
+          }
           const data = await response.json();
           if (requestGeneration !== positionRequestGeneration) return false;
           renderPositions(data);
@@ -169,7 +230,43 @@
           setNotice("#table-state", `Atenção: não foi possível consultar posições (${error.message}).`, true);
           document.querySelector("#previous-page").disabled = true;
           document.querySelector("#next-page").disabled = true;
-          latestImportKey = null;
+          if (error.retryable !== false) {
+            latestImportKey = null;
+            return false;
+          }
+          return "handled";
+        }
+      }
+
+      function replaceDynamicOptions(select, values, allLabel) {
+        const current = select.value;
+        const all = document.createElement("option");
+        all.value = "";
+        all.textContent = allLabel;
+        const options = values.map((value) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = value;
+          return option;
+        });
+        select.replaceChildren(all, ...options);
+        select.value = values.includes(current) ? current : "";
+      }
+
+      async function loadFilterOptions() {
+        const requestGeneration = ++filterRequestGeneration;
+        try {
+          const response = await fetch("/api/filter-options", {cache: "no-store"});
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          if (requestGeneration !== filterRequestGeneration) return false;
+          replaceDynamicOptions(filterStrategy, data.strategies, "Todas");
+          replaceDynamicOptions(filterSymbolFamily, data.symbol_families, "Todos");
+          setNotice("#filter-state", "", false);
+          return true;
+        } catch (error) {
+          if (requestGeneration !== filterRequestGeneration) return false;
+          setNotice("#filter-state", `Atenção: não foi possível atualizar os filtros (${error.message}).`, true);
           return false;
         }
       }
@@ -184,16 +281,34 @@
           renderStatus(data);
           setNotice("#error", "", false);
           const importKey = data.last_import?.source_hash || null;
-          if (data.state === "ready" && importKey !== latestImportKey) {
-            page.offset = 0;
-            if (await loadPositions()) latestImportKey = importKey;
+          if (data.state === "ready") {
+            if (importKey !== latestFilterImportKey) {
+              const filtersLoaded = await loadFilterOptions();
+              if (requestGeneration !== statusRequestGeneration) return;
+              if (filtersLoaded) {
+                latestFilterImportKey = importKey;
+                if (latestImportKey === importKey) latestImportKey = null;
+              }
+            }
+            if (importKey !== latestImportKey) {
+              page.offset = 0;
+              const loaded = await loadPositions();
+              if (requestGeneration !== statusRequestGeneration) return;
+              if (loaded === true || loaded === "handled") latestImportKey = importKey;
+            }
           }
           if (data.state === "empty") {
+            positionRequestGeneration += 1;
+            filterRequestGeneration += 1;
             latestImportKey = null;
+            latestFilterImportKey = null;
             renderPositions({items: [], total: 0});
           }
           if (data.state === "unavailable") {
+            positionRequestGeneration += 1;
+            filterRequestGeneration += 1;
             latestImportKey = null;
+            latestFilterImportKey = null;
             document.querySelector("#positions-body").replaceChildren();
             document.querySelector("#page-summary").textContent = "Projeção indisponível.";
             document.querySelector("#previous-page").disabled = true;
@@ -208,6 +323,20 @@
 
       sortBy.addEventListener("change", () => { page.offset = 0; loadPositions(); });
       sortOrder.addEventListener("change", () => { page.offset = 0; loadPositions(); });
+      [filterStrategy, filterSymbolFamily, filterDirection, filterStatus,
+        filterAssociation, dateFrom, dateTo].forEach((control) => {
+        control.addEventListener("change", () => {
+          if (control === filterAssociation && filterAssociation.value === "unassociated") {
+            filterStrategy.value = "";
+          }
+          if (control === filterStrategy && filterStrategy.value
+              && filterAssociation.value === "unassociated") {
+            filterAssociation.value = "all";
+          }
+          page.offset = 0;
+          loadPositions();
+        });
+      });
       document.querySelector("#previous-page").addEventListener("click", () => {
         page.offset = Math.max(0, page.offset - page.limit); loadPositions();
       });

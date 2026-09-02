@@ -11,13 +11,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from algobotdash.storage import CURRENT_SCHEMA_VERSION, SCHEMA, read_positions
+from algobotdash.storage import SCHEMA, read_positions
 from algobotdash.web import app
 from tests.fixture_helpers import get_asgi, insert_positions
 
 
 class QueryApiTests(unittest.TestCase):
     """Verify externally visible position and projection query behavior."""
+
+    tmp_path: Path = Path()
+    config_path: Path = Path()
+    database_path: Path = Path()
 
     def setUp(self) -> None:
         self.tmp_path = Path(tempfile.mkdtemp(prefix="algobotdash-query-tests-"))
@@ -81,15 +85,15 @@ class QueryApiTests(unittest.TestCase):
                 [
                     (
                         "100", "Turtle", "WIN", "WINQ26", "buy", "2026-08-01T10:00:00-03:00",
-                        "2026-08-01T11:00:00-03:00", "closed", 1, 1, 100, 110, -1, 0, 9, 2,
+                        "2026-08-01T11:00:00-03:00", "closed", 1, 1, 100, 110, -1, 0, 9, 1, 2,
                     ),
                     (
                         "200", None, "WDO", "WDOU26", "sell", "2026-08-02T10:00:00+00:00",
-                        None, "open", 1, 1, 200, None, -1, 0, 999, 2,
+                        None, "open", 1, 1, 200, None, -1, 0, 999, 0, 2,
                     ),
                     (
                         "300", "FVG", "WIN", "WINV26", "buy", "2026-08-03T10:00:00+00:00",
-                        "2026-08-03T12:00:00+00:00", "closed", 1, 1, 300, 280, -1, 0, -21, 2,
+                        "2026-08-03T12:00:00+00:00", "closed", 1, 1, 300, 280, -1, 0, -21, 1, 2,
                     ),
                 ],
             )
@@ -110,7 +114,7 @@ class QueryApiTests(unittest.TestCase):
         self._seed_projection()
 
         response = self._request(
-            "/api/positions?limit=2&sort_by=opened_at&sort_order=desc"
+            "/api/positions?status=all&limit=2&sort_by=opened_at&sort_order=desc"
         )
 
         self.assertEqual(response.status_code, 200)
@@ -124,13 +128,174 @@ class QueryApiTests(unittest.TestCase):
         self.assertIsNone(payload["items"][1]["strategy"])
         self.assertIsNone(payload["items"][1]["realized_pnl"])
 
-        earliest = self._request("/api/positions?limit=1&sort_by=opened_at&sort_order=asc")
+        earliest = self._request(
+            "/api/positions?status=all&limit=1&sort_by=opened_at&sort_order=asc"
+        )
         self.assertEqual(earliest.json()["items"][0]["opened_at"], "2026-08-01T13:00:00+00:00")
 
         default_order = self._request("/api/positions")
         self.assertEqual(
             [item["position_id"] for item in default_order.json()["items"]],
-            ["300", "100", "200"],
+            ["300", "100"],
+        )
+
+    def test_positions_apply_shared_filters_and_report_association(self) -> None:
+        """Combine analytical dimensions and expose proven association state."""
+        self._seed_projection()
+
+        response = self._request(
+            "/api/positions?strategy=Turtle&symbol_family=WIN&direction=buy"
+            "&association=associated&date_from=2026-08-01&date_to=2026-08-01"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual(response.json()["items"][0]["position_id"], "100")
+        self.assertEqual(response.json()["items"][0]["association"], "associated")
+
+        unassociated = self._request(
+            "/api/positions?status=open&association=unassociated"
+        )
+        self.assertEqual(unassociated.status_code, 200)
+        self.assertEqual(
+            [item["position_id"] for item in unassociated.json()["items"]], ["200"]
+        )
+        self.assertEqual(unassociated.json()["items"][0]["association"], "unassociated")
+
+    def test_each_shared_filter_is_independently_effective(self) -> None:
+        """Prove every dimension against rows that differ on the other dimensions."""
+        self._seed_projection()
+
+        cases = {
+            "strategy": ("/api/positions?status=all&strategy=Turtle", ["100"]),
+            "strategy_outer_whitespace": (
+                "/api/positions?status=all&strategy=%20Turtle%20", ["100"]
+            ),
+            "strategy_case_sensitive": (
+                "/api/positions?status=all&strategy=turtle", []
+            ),
+            "symbol_family": ("/api/positions?status=all&symbol_family=WDO", ["200"]),
+            "symbol_family_missing": (
+                "/api/positions?status=all&symbol_family=IND", []
+            ),
+            "direction": ("/api/positions?status=all&direction=sell", ["200"]),
+            "associated": (
+                "/api/positions?status=all&association=associated", ["300", "100"]
+            ),
+            "unassociated": (
+                "/api/positions?status=all&association=unassociated", ["200"]
+            ),
+        }
+        for name, (path, expected) in cases.items():
+            with self.subTest(name=name):
+                response = self._request(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    [item["position_id"] for item in response.json()["items"]],
+                    expected,
+                )
+                self.assertEqual(response.json()["total"], len(expected))
+
+    def test_position_dates_use_bahia_day_and_status_specific_timestamp(self) -> None:
+        """Use exit day for closed positions and entry day for open positions."""
+        self._seed_projection()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute(
+                "UPDATE positions SET exit_at = ? WHERE position_id = '100'",
+                ("2026-08-02T01:30:00+00:00",),
+            )
+            connection.execute(
+                "UPDATE positions SET entry_at = ? WHERE position_id = '200'",
+                ("2026-08-03T01:30:00+00:00",),
+            )
+
+        closed = self._request(
+            "/api/positions?date_from=2026-08-01&date_to=2026-08-01"
+        )
+        opened = self._request(
+            "/api/positions?status=open&date_from=2026-08-02&date_to=2026-08-02"
+        )
+
+        self.assertEqual(
+            [item["position_id"] for item in closed.json()["items"]], ["100"]
+        )
+        self.assertEqual(
+            [item["position_id"] for item in opened.json()["items"]], ["200"]
+        )
+
+    def test_positions_validate_filter_contract(self) -> None:
+        """Reject invalid ranges, blank dimensions, and contradictory filters."""
+        self._seed_projection()
+
+        inverted = self._request(
+            "/api/positions?date_from=2026-08-03&date_to=2026-08-01"
+        )
+        contradictory = self._request(
+            "/api/positions?strategy=Turtle&association=unassociated"
+        )
+        blank = self._request("/api/positions?strategy=%20%20")
+        unknown = self._request("/api/positions?strategy=Missing")
+        injection = self._request(
+            "/api/positions?status=all&strategy=Turtle%27%20OR%201%3D1%20--"
+        )
+        invalid_enum_paths = (
+            "/api/positions?direction=sideways",
+            "/api/positions?status=finished",
+            "/api/positions?association=maybe",
+        )
+
+        self.assertEqual(inverted.status_code, 422)
+        self.assertEqual(inverted.json()["detail"]["code"], "invalid_date_range")
+        self.assertEqual(contradictory.status_code, 422)
+        self.assertEqual(
+            contradictory.json()["detail"]["code"], "contradictory_filters"
+        )
+        self.assertEqual(blank.status_code, 422)
+        self.assertEqual(unknown.status_code, 200)
+        self.assertEqual(unknown.json()["total"], 0)
+        self.assertEqual(injection.status_code, 200)
+        self.assertEqual(injection.json()["total"], 0)
+        for path in invalid_enum_paths:
+            with self.subTest(path=path):
+                self.assertEqual(self._request(path).status_code, 422)
+
+    def test_filter_options_are_observed_distinct_and_sorted(self) -> None:
+        """Return one deterministic catalog built from the current projection."""
+        self._seed_projection()
+        with sqlite3.connect(self.database_path) as connection:
+            insert_positions(
+                connection,
+                [
+                    (
+                        "400", None, "BIT", "BITQ26", "sell",
+                        "2026-08-04T10:00:00-03:00",
+                        "2026-08-04T11:00:00-03:00", "closed", 1, 1, 1, 2,
+                        0, 0, 1, 0, 2,
+                    )
+                ],
+            )
+
+        response = self._request("/api/filter-options")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "strategies": ["FVG", "Turtle"],
+                "symbol_families": ["BIT", "WDO", "WIN"],
+            },
+        )
+
+    def test_filter_options_reject_malformed_projection(self) -> None:
+        """Return the public projection error when SQLite cannot be queried."""
+        self.database_path.write_bytes(b"not a sqlite database")
+
+        response = self._request("/api/filter-options")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(),
+            {"detail": {"code": "projection_unavailable"}},
         )
 
     def test_positions_reject_invalid_pagination_and_sorting(self) -> None:
@@ -159,7 +324,9 @@ class QueryApiTests(unittest.TestCase):
         """Keep open positions without realized P&L after realized positions."""
         self._seed_projection()
 
-        response = self._request("/api/positions?sort_by=realized_pnl&sort_order=desc")
+        response = self._request(
+            "/api/positions?status=all&sort_by=realized_pnl&sort_order=desc"
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -229,23 +396,18 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(status.json()["state"], "unavailable")
         self.assertEqual(status.json()["projection"], "invalid")
 
-    def test_positions_reject_duplicate_schema_version_rows(self) -> None:
-        """Reject projections whose schema version has more than one row."""
-        connection = sqlite3.connect(self.database_path)
-        connection.executescript(SCHEMA)
-        connection.execute("DROP TABLE schema_version")
-        connection.execute("CREATE TABLE schema_version (version INTEGER)")
-        connection.executemany(
-            "INSERT INTO schema_version(version) VALUES (?)",
-            [(CURRENT_SCHEMA_VERSION,), (CURRENT_SCHEMA_VERSION,)],
-        )
-        connection.commit()
-        connection.close()
+    def test_projection_uses_one_unversioned_schema(self) -> None:
+        """The MVP projection should have no schema-version metadata."""
+        with self._projection() as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
 
-        response = self._request("/api/positions")
-
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["detail"]["code"], "projection_unavailable")
+        self.assertNotIn("schema_version", tables)
+        self.assertEqual(self._request("/api/positions").status_code, 200)
 
     def test_positions_sort_subsecond_timestamps_chronologically(self) -> None:
         """Keep timestamp ordering precise below whole-second resolution."""
@@ -256,24 +418,27 @@ class QueryApiTests(unittest.TestCase):
             )
             connection.executemany(
                 "INSERT INTO positions("
-                "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
+                "position_id, strategy, is_associated, symbol_family, symbol_raw, "
+                "direction, entry_at, exit_at, "
                 "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
-                "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
-                        "a-later", None, None, "WINQ26", "buy",
+                        "a-later", None, 0, None, "WINQ26", "buy",
                         "2026-08-01T10:00:00.000400-03:00", None, "open", None, None,
                         None, None, 0, 0, 0, 1,
                     ),
                     (
-                        "z-earlier", None, None, "WINQ26", "buy",
+                        "z-earlier", None, 0, None, "WINQ26", "buy",
                         "2026-08-01T10:00:00.000100-03:00", None, "open", None, None,
                         None, None, 0, 0, 0, 1,
                     ),
                 ],
             )
 
-        response = self._request("/api/positions?sort_by=opened_at&sort_order=asc")
+        response = self._request(
+            "/api/positions?status=open&sort_by=opened_at&sort_order=asc"
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -290,16 +455,17 @@ class QueryApiTests(unittest.TestCase):
             )
             connection.execute(
                 "INSERT INTO positions("
-                "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
+                "position_id, strategy, is_associated, symbol_family, symbol_raw, "
+                "direction, entry_at, exit_at, "
                 "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
-                "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    "naive", None, None, "WINQ26", "buy", "2026-08-01T10:00:00", None,
+                    "naive", None, 0, None, "WINQ26", "buy", "2026-08-01T10:00:00", None,
                     "open", None, None, None, None, 0, 0, 0, 1,
                 ),
             )
 
-        response = self._request("/api/positions?sort_by=opened_at")
+        response = self._request("/api/positions?status=open&sort_by=opened_at")
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"]["code"], "projection_unavailable")

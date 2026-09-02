@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,8 +14,9 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from .config import ConfigurationError, load_config
 from .environment import load_environment
 from .storage import (
+    PositionFilters,
     ProjectionUnavailableError,
-    read_import_history,
+    read_filter_options,
     read_imports,
     read_position_orders,
     read_positions,
@@ -62,15 +63,15 @@ def _health_state() -> dict[str, Any]:
 
     if DATABASE_PATH.is_file():
         try:
-            history = read_import_history(DATABASE_PATH)
-        except (OSError, sqlite3.Error, ValueError) as exc:
+            history, _ = read_imports(DATABASE_PATH, limit=1, offset=0)
+        except ProjectionUnavailableError as exc:
             result["projection"] = "invalid"
             result["projection_error"] = _error_message(exc)
             logger.warning("não foi possível ler o histórico da projeção: %s", exc)
         else:
             result["projection"] = "available"
             if history:
-                result["last_imported_at"] = history[-1][3]
+                result["last_imported_at"] = history[0]["imported_at"]
     if (
         result["configuration"] != "valid"
         or result["source"] == "missing"
@@ -91,6 +92,19 @@ def _projection_error(_exc: ProjectionUnavailableError) -> HTTPException:
         status_code=503,
         detail={"code": "projection_unavailable"},
     )
+
+
+def _optional_dimension(value: str | None, name: str) -> str | None:
+    """Strip an optional dimension and reject whitespace-only input."""
+    if value is None:
+        return None
+    if normalized := value.strip():
+        return normalized
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_filter", "field": name},
+        )
 
 
 def _status_state() -> dict[str, Any]:
@@ -146,6 +160,8 @@ async def health_endpoint() -> dict[str, Any] | JSONResponse:
     )
 
 
+# FastAPI exposes each query parameter through the endpoint signature.
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
 @app.get("/api/positions")
 async def positions_endpoint(
     limit: int = Query(default=50, ge=1, le=200),
@@ -154,8 +170,27 @@ async def positions_endpoint(
         "opened_at", "closed_at", "realized_pnl", "symbol_family", "status"
     ] = "closed_at",
     sort_order: Literal["asc", "desc"] = "desc",
+    strategy: str | None = None,
+    symbol_family: str | None = None,
+    direction: Literal["buy", "sell"] | None = None,
+    status: Literal["closed", "open", "all"] = "closed",
+    association: Literal["associated", "unassociated", "all"] = "all",
+    date_from: date | None = None,
+    date_to: date | None = None,
 ) -> dict[str, Any]:
-    """Return a page of analytical positions with validated ordering."""
+    """Return a filtered page of analytical positions."""
+    normalized_strategy = _optional_dimension(strategy, "strategy")
+    normalized_symbol_family = _optional_dimension(symbol_family, "symbol_family")
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_date_range"},
+        )
+    if normalized_strategy is not None and association == "unassociated":
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "contradictory_filters"},
+        )
     try:
         items, total = read_positions(
             DATABASE_PATH,
@@ -163,10 +198,29 @@ async def positions_endpoint(
             offset=offset,
             sort_by=sort_by,
             sort_order=sort_order,
+            filters=PositionFilters(
+                strategy=normalized_strategy,
+                symbol_family=normalized_symbol_family,
+                direction=direction,
+                status=status,
+                association=association,
+                date_from=date_from,
+                date_to=date_to,
+            ),
         )
     except ProjectionUnavailableError as exc:
         raise _projection_error(exc) from exc
     return {"items": items, "total": total, "limit": limit, "offset": offset}
+# pylint: enable=too-many-arguments,too-many-positional-arguments,too-many-locals
+
+
+@app.get("/api/filter-options")
+async def filter_options_endpoint() -> dict[str, list[str]]:
+    """Return observed values for dynamic dashboard filters."""
+    try:
+        return read_filter_options(DATABASE_PATH)
+    except ProjectionUnavailableError as exc:
+        raise _projection_error(exc) from exc
 
 
 @app.get("/api/positions/{position_id}/orders")

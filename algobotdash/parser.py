@@ -38,6 +38,7 @@ class PositionRecord:
     comment: str
     strategy: str | None
     status: str
+    is_associated: bool
 
 
 @dataclass(frozen=True)
@@ -286,6 +287,7 @@ def _parse_positions(
                 comment,
                 strategy,
                 "closed" if exit_at else "open",
+                False,
             )
         )
     return records, rejected
@@ -337,19 +339,22 @@ def _parse_orders(
 def _associate_position_strategies(
     positions: Iterable[PositionRecord], orders: Iterable[OrderRecord]
 ) -> list[PositionRecord]:
-    """Copy an opening-order strategy only when its ticket and symbol match."""
+    """Copy opening-order metadata when its ticket and raw symbol match."""
     orders_by_ticket = {order.order_id: order for order in orders}
     associated: list[PositionRecord] = []
     for position in positions:
         order = orders_by_ticket.get(position.position_id)
-        if (
-            order is None
-            or order.symbol_raw != position.symbol_raw
-            or order.strategy is None
-        ):
+        if order is None or order.symbol_raw != position.symbol_raw:
             associated.append(position)
             continue
-        associated.append(replace(position, comment=order.comment, strategy=order.strategy))
+        associated.append(
+            replace(
+                position,
+                comment=order.comment,
+                strategy=order.strategy,
+                is_associated=True,
+            )
+        )
     return associated
 
 

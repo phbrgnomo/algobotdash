@@ -151,6 +151,12 @@ class ImportPipelineTests(unittest.TestCase):
                 "select strategy from positions where position_id = '1'"
             ).fetchone()[0]
         )
+        self.assertEqual(
+            connection.execute(
+                "select is_associated from positions order by position_id"
+            ).fetchall(),
+            [(0,), (0,)],
+        )
         self.assertIsNone(
             connection.execute(
                 "select position_id from orders where order_id = '1001'"
@@ -205,14 +211,15 @@ class ImportPipelineTests(unittest.TestCase):
         connection = sqlite3.connect(database)
         self.assertEqual(
             connection.execute(
-                "select strategy from positions where position_id = '1001'"
-            ).fetchone()[0],
-            "FVG",
+                "select strategy, is_associated from positions where position_id = '1001'"
+            ).fetchone(),
+            ("FVG", 1),
         )
-        self.assertIsNone(
+        self.assertEqual(
             connection.execute(
-                "select strategy from positions where position_id = '2'"
-            ).fetchone()[0]
+                "select strategy, is_associated from positions where position_id = '2'"
+            ).fetchone(),
+            (None, 0),
         )
         connection.close()
 
@@ -232,15 +239,16 @@ class ImportPipelineTests(unittest.TestCase):
 
         self.assertEqual(result.no_comment_count, 2)
         connection = sqlite3.connect(database)
-        self.assertIsNone(
+        self.assertEqual(
             connection.execute(
-                "select strategy from positions where position_id = '1001'"
-            ).fetchone()[0]
+                "select strategy, is_associated from positions where position_id = '1001'"
+            ).fetchone(),
+            (None, 0),
         )
         connection.close()
 
-    def test_read_report_preserves_position_metadata_for_unclassified_order(self) -> None:
-        """An unclassified linked order cannot replace position-derived values."""
+    def test_read_report_marks_matching_unclassified_order_as_associated(self) -> None:
+        """A matching order proves association even without a classified strategy."""
         source = self.tmp_path / "history.xlsx"
         workbook(source, legacy_report=True)
         book = load_workbook(source)
@@ -252,8 +260,48 @@ class ImportPipelineTests(unittest.TestCase):
 
         positions, _, _, _, _ = read_report(source, config(source))
 
+        self.assertEqual(positions[0].comment, "manual order")
+        self.assertIsNone(positions[0].strategy)
+        self.assertTrue(positions[0].is_associated)
+
+    def test_read_report_rejects_order_association_when_symbol_differs(self) -> None:
+        """A matching ticket with another raw symbol cannot supply order metadata."""
+        source = self.tmp_path / "history.xlsx"
+        workbook(source, legacy_report=True)
+        book = load_workbook(source)
+        sheet = book.active
+        if sheet is None:
+            raise RuntimeError("workbook fixture has no active worksheet")
+        sheet["C8"] = "WINV26"
+        book.save(source)
+
+        positions, orders, _, _, _ = read_report(source, config(source))
+
+        self.assertEqual(orders[0].order_id, positions[0].position_id)
+        self.assertNotEqual(orders[0].symbol_raw, positions[0].symbol_raw)
         self.assertEqual(positions[0].comment, "")
         self.assertIsNone(positions[0].strategy)
+        self.assertFalse(positions[0].is_associated)
+
+    def test_refresh_persists_matching_unclassified_order_as_associated(self) -> None:
+        """Persist proven association independently from strategy classification."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "algobotdash.sqlite"
+        workbook(source, legacy_report=True)
+        book = load_workbook(source)
+        sheet = book.active
+        if sheet is None:
+            raise RuntimeError("workbook fixture has no active worksheet")
+        sheet["L8"] = "manual order"
+        book.save(source)
+
+        ImportService(config(source)).refresh(database)
+
+        with sqlite3.connect(database) as connection:
+            persisted = connection.execute(
+                "select strategy, is_associated from positions where position_id = '1001'"
+            ).fetchone()
+        self.assertEqual(persisted, (None, 1))
 
 
     def test_configuration_uses_longest_symbol_prefix(self) -> None:
@@ -450,25 +498,39 @@ class ImportPipelineTests(unittest.TestCase):
         connection.close()
 
 
-    def test_refresh_rejects_unsupported_schema_version(self) -> None:
-        """Refresh should reject an unsupported database schema version."""
+    def test_refresh_rebuilds_previous_shape_without_schema_migration(self) -> None:
+        """Refresh should rebuild analytics while retaining readable import history."""
         tmp_path = self.tmp_path
         source = tmp_path / "history.xlsx"
         database = tmp_path / "trades.sqlite"
         workbook(source)
         connection = sqlite3.connect(database)
-        connection.execute("create table schema_version (version integer primary key)")
-        connection.execute("insert into schema_version values (99)")
-        connection.execute("create table imports (id integer primary key)")
+        connection.execute(
+            "create table imports (id integer primary key, source_name text, "
+            "source_hash text, imported_at text, rows_read integer, "
+            "positions_created integer, no_comment_count integer, rejected_count integer)"
+        )
+        connection.execute(
+            "insert into imports values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, "old.xlsx", "old-hash", "2026-07-01T00:00:00+00:00", 1, 1, 0, 0),
+        )
+        connection.execute("create table positions (id integer primary key)")
         connection.commit()
         connection.close()
 
-        with self.assertRaisesRegex(ValueError, "versão de schema SQLite não suportada"):
-            ImportService(config(source)).refresh(database)
+        ImportService(config(source)).refresh(database)
+
+        connection = sqlite3.connect(database)
+        columns = {
+            row[1] for row in connection.execute("pragma table_info(positions)")
+        }
+        self.assertIn("is_associated", columns)
+        self.assertEqual(connection.execute("select count(*) from imports").fetchone()[0], 2)
+        connection.close()
 
 
-    def test_refresh_rejects_unversioned_database(self) -> None:
-        """Refresh should reject a database without schema metadata."""
+    def test_refresh_rejects_malformed_import_history(self) -> None:
+        """Refresh should not overwrite an unreadable import-history table."""
         tmp_path = self.tmp_path
         source = tmp_path / "history.xlsx"
         database = tmp_path / "trades.sqlite"
@@ -478,8 +540,36 @@ class ImportPipelineTests(unittest.TestCase):
         connection.commit()
         connection.close()
 
-        with self.assertRaisesRegex(ValueError, "schema_version ausente"):
+        with self.assertRaisesRegex(ValueError, "colunas ausentes em imports"):
             ImportService(config(source)).refresh(database)
+
+    def test_refresh_rejects_invalid_prior_import_timestamp(self) -> None:
+        """Refresh should not publish history that makes the projection unreadable."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "trades.sqlite"
+        workbook(source)
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "create table imports (id integer primary key, source_name text, "
+            "source_hash text, imported_at text, rows_read integer, "
+            "positions_created integer, no_comment_count integer, rejected_count integer)"
+        )
+        connection.execute(
+            "insert into imports values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, "old.xlsx", "old-hash", "invalid", 1, 1, 0, 0),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(ValueError, "imported_at inválido"):
+            ImportService(config(source)).refresh(database)
+
+        connection = sqlite3.connect(database)
+        self.assertEqual(
+            connection.execute("select imported_at from imports").fetchone()[0],
+            "invalid",
+        )
+        connection.close()
 
 
     def test_refresh_rejects_malformed_report_without_mutating_projection(self) -> None:

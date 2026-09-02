@@ -5,13 +5,13 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TypeAlias
+from zoneinfo import ZoneInfo
 
 from .parser import OrderRecord, PositionRecord, RejectedRecord, TransactionRecord
 
-CURRENT_SCHEMA_VERSION = 2
 ImportHistoryRow: TypeAlias = tuple[int, str, str, str, int, int, int, int]
 ProjectionRow: TypeAlias = dict[str, Any]
 
@@ -23,15 +23,16 @@ POSITION_SORT_COLUMNS = {
     "status": "status",
 }
 SORT_ORDERS = {"asc": "ASC", "desc": "DESC"}
+REPORT_TZ = ZoneInfo("America/Bahia")
 
 REQUIRED_TABLE_COLUMNS = {
-    "schema_version": {"version"},
     "imports": {
         "id", "source_name", "source_hash", "imported_at", "rows_read",
         "positions_created", "no_comment_count", "rejected_count",
     },
     "positions": {
-        "id", "position_id", "strategy", "symbol_family", "symbol_raw", "direction",
+        "id", "position_id", "strategy", "is_associated", "symbol_family",
+        "symbol_raw", "direction",
         "entry_at", "exit_at", "status", "volume_requested", "volume_executed",
         "entry_price", "exit_price", "commission", "swap", "pnl", "import_id",
     },
@@ -54,6 +55,19 @@ class ProjectionUnavailableError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class PositionFilters:
+    """Validated filters shared by position rows and their total count."""
+
+    strategy: str | None = None
+    symbol_family: str | None = None
+    direction: str | None = None
+    status: str = "closed"
+    association: str = "all"
+    date_from: date | None = None
+    date_to: date | None = None
+
+
+@dataclass(frozen=True)
 class ProjectionData:
     """Parsed records and counters required to build a projection."""
 
@@ -65,10 +79,6 @@ class ProjectionData:
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
-CREATE TABLE schema_version (
-  version INTEGER PRIMARY KEY
-);
-INSERT INTO schema_version(version) VALUES (2);
 CREATE TABLE imports (
   id INTEGER PRIMARY KEY,
   source_name TEXT NOT NULL,
@@ -83,6 +93,7 @@ CREATE TABLE positions (
   id INTEGER PRIMARY KEY,
   position_id TEXT NOT NULL UNIQUE,
   strategy TEXT,
+  is_associated INTEGER NOT NULL CHECK (is_associated IN (0, 1)),
   symbol_family TEXT,
   symbol_raw TEXT NOT NULL,
   direction TEXT NOT NULL,
@@ -159,17 +170,26 @@ def read_import_history(path: Path) -> list[ImportHistoryRow]:
         }
         if "imports" not in tables:
             raise ValueError(f"schema SQLite incompatível: tabela imports ausente em {path}")
-        if "schema_version" not in tables:
-            raise ValueError(f"schema SQLite incompatível em {path}: tabela schema_version ausente")
-        _validate_schema_version(connection)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(imports)")}
-        if "positions_created" in columns:
-            return connection.execute(
-                "SELECT id, source_name, source_hash, imported_at, rows_read, "
-                "positions_created, no_comment_count, rejected_count "
-                "FROM imports ORDER BY id"
-            ).fetchall()
-        raise ValueError(f"schema SQLite incompatível em {path}: coluna positions_created ausente")
+        required = REQUIRED_TABLE_COLUMNS["imports"]
+        if missing_columns := required - columns:
+            raise ValueError(
+                f"schema SQLite incompatível em {path}: colunas ausentes em imports: "
+                f"{sorted(missing_columns)}"
+            )
+        history = connection.execute(
+            "SELECT id, source_name, source_hash, imported_at, rows_read, "
+            "positions_created, no_comment_count, rejected_count "
+            "FROM imports ORDER BY id"
+        ).fetchall()
+        for row in history:
+            try:
+                _ = _utc_timestamp(row[3])
+            except ProjectionUnavailableError as exc:
+                raise ValueError(
+                    f"schema SQLite incompatível em {path}: imported_at inválido"
+                ) from exc
+        return history
     finally:
         connection.close()
 
@@ -185,6 +205,9 @@ def _open_projection(path: Path) -> sqlite3.Connection:
         connection.create_function(
             "utc_timestamp", 1, _utc_timestamp, deterministic=True
         )
+        connection.create_function(
+            "bahia_date", 1, _bahia_date, deterministic=True
+        )
         _validate_projection(connection)
         return connection
     except (OSError, sqlite3.Error, ValueError) as exc:
@@ -194,7 +217,7 @@ def _open_projection(path: Path) -> sqlite3.Connection:
 
 
 def _validate_projection(connection: sqlite3.Connection) -> None:
-    """Validate the tables, columns and schema version of an open projection."""
+    """Validate the required tables and columns of an open projection."""
     tables = {
         row[0]
         for row in connection.execute(
@@ -216,30 +239,23 @@ def _validate_projection(connection: sqlite3.Connection) -> None:
             raise ValueError(
                 f"colunas ausentes em {table}: {sorted(missing_columns)}"
             )
-    _validate_schema_version(connection)
-
-
-def _validate_schema_version(connection: sqlite3.Connection) -> None:
-    """Require exactly one supported schema-version row."""
-    versions = [row[0] for row in connection.execute("SELECT version FROM schema_version")]
-    if versions != [CURRENT_SCHEMA_VERSION]:
-        raise ValueError(f"versão de schema SQLite não suportada: {versions}")
-
-
+# pylint: disable=too-many-arguments,too-many-positional-arguments
 def _page_rows(
     connection: sqlite3.Connection,
     query: str,
     count_query: str,
     limit: int,
     offset: int,
+    parameters: tuple[object, ...] = (),
 ) -> tuple[list[ProjectionRow], int]:
     """Return a page and its total from a read-only projection query."""
     try:
-        total = connection.execute(count_query).fetchone()[0]
-        rows = connection.execute(query, (limit, offset)).fetchall()
+        total = connection.execute(count_query, parameters).fetchone()[0]
+        rows = connection.execute(query, (*parameters, limit, offset)).fetchall()
     except sqlite3.Error as exc:
         raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
     return [dict(row) for row in rows], total
+# pylint: enable=too-many-arguments,too-many-positional-arguments
 
 
 def _utc_timestamp(value: object) -> str | None:
@@ -257,6 +273,14 @@ def _utc_timestamp(value: object) -> str | None:
     return timestamp.astimezone(timezone.utc).isoformat()
 
 
+def _bahia_date(value: object) -> str | None:
+    """Return the calendar date of an aware timestamp in America/Bahia."""
+    normalized = _utc_timestamp(value)
+    if normalized is None:
+        return None
+    return datetime.fromisoformat(normalized).astimezone(REPORT_TZ).date().isoformat()
+
+
 def _normalize_timestamps(
     rows: list[ProjectionRow], *fields: str
 ) -> list[ProjectionRow]:
@@ -267,6 +291,7 @@ def _normalize_timestamps(
     return rows
 
 
+# pylint: disable=too-many-arguments,too-many-locals
 def read_positions(
     path: Path,
     *,
@@ -274,6 +299,7 @@ def read_positions(
     offset: int,
     sort_by: str,
     sort_order: str,
+    filters: PositionFilters | None = None,
 ) -> tuple[list[ProjectionRow], int]:
     """Read a deterministic page of analytical positions from the projection."""
     try:
@@ -281,14 +307,18 @@ def read_positions(
         order = SORT_ORDERS[sort_order]
     except KeyError as exc:
         raise ValueError("ordenação de posições inválida") from exc
-    query = (  # nosec B608 -- column and order come from fixed allowlists
-        "SELECT position_id, strategy, symbol_family, "
+    active_filters = filters or PositionFilters()
+    where_sql, parameters = _position_where(active_filters)
+    query = (  # Fixed predicates and allowlisted ordering; values stay parameterized.
+        "SELECT position_id, strategy, symbol_family, "  # noqa: S608  # nosec B608
         "CASE WHEN strategy IS NOT NULL AND symbol_family IS NOT NULL "
         "THEN symbol_family || ' ' || strategy END AS strategy_key, "
+        "CASE WHEN is_associated = 1 THEN 'associated' ELSE 'unassociated' "
+        "END AS association, "
         "direction, entry_at AS opened_at, "
         "exit_at AS closed_at, status, "
         "CASE WHEN status = 'open' THEN NULL ELSE pnl END AS realized_pnl "
-        "FROM positions "
+        f"FROM positions {where_sql} "
         f"ORDER BY {column} {order}, position_id ASC LIMIT ? OFFSET ?"
     )
     connection = _open_projection(path)
@@ -296,11 +326,68 @@ def read_positions(
         rows, total = _page_rows(
             connection,
             query,
-            "SELECT COUNT(*) FROM positions",
+            f"SELECT COUNT(*) FROM positions {where_sql}",  # noqa: S608  # nosec B608
             limit,
             offset,
+            parameters,
         )
         return _normalize_timestamps(rows, "opened_at", "closed_at"), total
+    finally:
+        connection.close()
+# pylint: enable=too-many-arguments,too-many-locals
+
+
+def _position_where(filters: PositionFilters) -> tuple[str, tuple[object, ...]]:
+    """Build one parameterized predicate for position rows and count queries."""
+    clauses: list[str] = []
+    parameters: list[object] = []
+    if filters.strategy is not None:
+        clauses.append("strategy = ?")
+        parameters.append(filters.strategy)
+    if filters.symbol_family is not None:
+        clauses.append("symbol_family = ?")
+        parameters.append(filters.symbol_family)
+    if filters.direction is not None:
+        clauses.append("direction = ?")
+        parameters.append(filters.direction)
+    if filters.status != "all":
+        clauses.append("status = ?")
+        parameters.append(filters.status)
+    if filters.association != "all":
+        clauses.append("is_associated = ?")
+        parameters.append(1 if filters.association == "associated" else 0)
+    analytical_timestamp = "CASE WHEN status = 'open' THEN entry_at ELSE exit_at END"
+    if filters.date_from is not None:
+        clauses.append(f"bahia_date({analytical_timestamp}) >= ?")
+        parameters.append(filters.date_from.isoformat())
+    if filters.date_to is not None:
+        clauses.append(f"bahia_date({analytical_timestamp}) <= ?")
+        parameters.append(filters.date_to.isoformat())
+    return ("WHERE " + " AND ".join(clauses) if clauses else "", tuple(parameters))
+
+
+def read_filter_options(path: Path) -> dict[str, list[str]]:
+    """Return observed strategy and symbol-family filter values."""
+    connection = _open_projection(path)
+    try:
+        try:
+            strategies = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT strategy FROM positions "
+                    "WHERE strategy IS NOT NULL ORDER BY strategy"
+                )
+            ]
+            symbol_families = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT symbol_family FROM positions "
+                    "WHERE symbol_family IS NOT NULL ORDER BY symbol_family"
+                )
+            ]
+        except sqlite3.Error as exc:
+            raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
+        return {"strategies": strategies, "symbol_families": symbol_families}
     finally:
         connection.close()
 
@@ -373,6 +460,7 @@ def _position_values(position: PositionRecord, import_id: int) -> tuple[object, 
     return (
         position.position_id,
         position.strategy,
+        int(position.is_associated),
         position.symbol_family,
         position.symbol_raw,
         position.direction,
@@ -482,10 +570,10 @@ def build_projection(
             import_id = _require_import_id(cursor.lastrowid)
         connection.executemany(
             "INSERT INTO positions("
-            "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, "
+            "position_id, strategy, is_associated, symbol_family, symbol_raw, direction, entry_at, "
             "exit_at, status, volume_requested, volume_executed, entry_price, "
             "exit_price, commission, swap, pnl, import_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [_position_values(position, import_id) for position in positions],
         )
         connection.executemany(
