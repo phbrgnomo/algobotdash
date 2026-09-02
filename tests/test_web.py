@@ -96,6 +96,9 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="filter-state" aria-live="polite"', content)
         self.assertIn('id="table-state" role="alert"', content)
         self.assertIn('id="metrics-state" aria-live="polite"', content)
+        self.assertIn('id="metric-sample-size"', content)
+        self.assertIn('id="metric-winning-trades"', content)
+        self.assertIn('id="metric-losing-trades"', content)
         self.assertIn('id="metric-net-pnl"', content)
         self.assertIn('id="metric-sortino-per-position"', content)
         self.assertIn("Projeção indisponível.", content)
@@ -119,6 +122,7 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
   "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
   "filter-association", "date-from", "date-to", "metrics-summary", "metrics-state",
+  "metric-sample-size", "metric-winning-trades", "metric-losing-trades",
   "metric-net-pnl", "metric-gross-profit", "metric-gross-loss", "metric-win-rate",
   "metric-profit-factor", "metric-payoff", "metric-expectancy",
   "metric-sharpe-per-position", "metric-sortino-per-position"];
@@ -137,11 +141,13 @@ const pendingPositions = [];
 const pendingMetrics = [];
 const pendingFilters = [];
 const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
-  gross_profit: 20, gross_loss: -10, win_rate: 0.5, profit_factor: 2, payoff: 2,
+  gross_profit: 20, gross_loss: -10, winning_trades: 1, losing_trades: 1,
+  win_rate: 0.5, profit_factor: 2, payoff: 2,
   expectancy: 5, sharpe_per_position: 0.5, sortino_per_position: 0.5,
   unavailable_reasons: {}};
 const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: null,
-  gross_profit: null, gross_loss: null, win_rate: null, profit_factor: null, payoff: null,
+  gross_profit: null, gross_loss: null, winning_trades: null, losing_trades: null,
+  win_rate: null, profit_factor: null, payoff: null,
   expectancy: null, sharpe_per_position: null, sortino_per_position: null,
   unavailable_reasons: {net_pnl: "realized_metrics_unavailable_for_open_status"}};
 const statusPayload = () => ({state, configuration: "valid", source: "available",
@@ -271,6 +277,7 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
   "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
   "filter-association", "date-from", "date-to", "metrics-summary", "metrics-state",
+  "metric-sample-size", "metric-winning-trades", "metric-losing-trades",
   "metric-net-pnl", "metric-gross-profit", "metric-gross-loss", "metric-win-rate",
   "metric-profit-factor", "metric-payoff", "metric-expectancy",
   "metric-sharpe-per-position", "metric-sortino-per-position"];
@@ -293,11 +300,13 @@ const pending = [];
 let statusMode = "normal";
 const pendingStatuses = [];
 const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
-  gross_profit: 20, gross_loss: -10, win_rate: 0.5, profit_factor: 2, payoff: 2,
+  gross_profit: 20, gross_loss: -10, winning_trades: 1, losing_trades: 1,
+  win_rate: 0.5, profit_factor: 2, payoff: 2,
   expectancy: 5, sharpe_per_position: 0.5, sortino_per_position: 0.5,
   unavailable_reasons: {}};
 const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: null,
-  gross_profit: null, gross_loss: null, win_rate: null, profit_factor: null, payoff: null,
+  gross_profit: null, gross_loss: null, winning_trades: null, losing_trades: null,
+  win_rate: null, profit_factor: null, payoff: null,
   expectancy: null, sharpe_per_position: null, sortino_per_position: null,
   unavailable_reasons: {net_pnl: "realized_metrics_unavailable_for_open_status"}};
 const payload = () => ({state, configuration: "valid", source: "available",
@@ -330,13 +339,17 @@ const context = {
   setInterval: (callback) => { interval = callback; return 1; },
   URLSearchParams, Intl, Date, console,
 };
-vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus;", context);
+vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus; globalThis.formatMetric = formatMetric;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 (async () => {
   await flush(); await flush();
+  if (context.formatMetric("winning_trades", undefined) !== "—") throw new Error("missing metric rendered as NaN");
   if (filterFetches !== 1) throw new Error(`expected initial filter catalog, got ${filterFetches}`);
   if (!lastPositionUrl.includes("status=closed")) throw new Error(`missing default closed filter: ${lastPositionUrl}`);
   if (metricFetches !== 1) throw new Error(`expected initial metrics, got ${metricFetches}`);
+  if (elements["#metric-sample-size"].textContent !== "2") throw new Error("operation count formatting mismatch");
+  if (elements["#metric-winning-trades"].textContent !== "1") throw new Error("winning count formatting mismatch");
+  if (elements["#metric-losing-trades"].textContent !== "1") throw new Error("losing count formatting mismatch");
   if (elements["#metric-net-pnl"].textContent !== "10,00") throw new Error("metric formatting mismatch");
   if (elements["#metric-gross-loss"].textContent !== "-10,00") throw new Error("gross loss formatting mismatch");
   if (elements["#metric-win-rate"].textContent !== "50,00%") throw new Error("percentage formatting mismatch");

@@ -10,6 +10,8 @@ METRIC_NAMES = (
     "net_pnl",
     "gross_profit",
     "gross_loss",
+    "winning_trades",
+    "losing_trades",
     "win_rate",
     "profit_factor",
     "payoff",
@@ -17,12 +19,24 @@ METRIC_NAMES = (
     "sharpe_per_position",
     "sortino_per_position",
 )
-RATIO_NAMES = METRIC_NAMES[3:]
+RATIO_NAMES = (
+    "win_rate",
+    "profit_factor",
+    "payoff",
+    "expectancy",
+    "sharpe_per_position",
+    "sortino_per_position",
+)
 
 
 def _finite_ratio(numerator: float, denominator: float) -> float | None:
     """Return a representable ratio, never an infinite JSON number."""
-    result = numerator / denominator
+    if denominator == 0:
+        return None
+    try:
+        result = numerator / denominator
+    except OverflowError:
+        return None
     return result if math.isfinite(result) else None
 
 
@@ -48,6 +62,8 @@ def _empty_payload(excluded_open_positions: int) -> dict[str, object]:
         "net_pnl": 0.0,
         "gross_profit": 0.0,
         "gross_loss": 0.0,
+        "winning_trades": 0,
+        "losing_trades": 0,
         **dict.fromkeys(RATIO_NAMES),
         "unavailable_reasons": dict.fromkeys(RATIO_NAMES, "empty_sample"),
     }
@@ -151,6 +167,8 @@ def calculate_position_metrics(
         "net_pnl": net_pnl,
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
+        "winning_trades": len(wins),
+        "losing_trades": len(losses),
         "win_rate": len(wins) / len(pnl_values),
         "profit_factor": profit_factor,
         "payoff": payoff,

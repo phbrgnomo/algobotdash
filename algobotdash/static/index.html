@@ -97,6 +97,9 @@
           <h3 id="metrics-title">Métricas por posição</h3>
           <small id="metrics-summary">Consultando métricas...</small>
           <div class="metrics-grid">
+            <div class="metric-card"><small>Qt. de operações</small><strong id="metric-sample-size">—</strong></div>
+            <div class="metric-card"><small>Trades positivos (win)</small><strong id="metric-winning-trades">—</strong></div>
+            <div class="metric-card"><small>Trades negativos (loss)</small><strong id="metric-losing-trades">—</strong></div>
             <div class="metric-card"><small>P&amp;L líquido</small><strong id="metric-net-pnl">—</strong></div>
             <div class="metric-card"><small>Ganho bruto</small><strong id="metric-gross-profit">—</strong></div>
             <div class="metric-card"><small>Perda bruta</small><strong id="metric-gross-loss">—</strong></div>
@@ -160,6 +163,8 @@
       }
 
       const metricIds = {
+        sample_size: "#metric-sample-size", winning_trades: "#metric-winning-trades",
+        losing_trades: "#metric-losing-trades",
         net_pnl: "#metric-net-pnl", gross_profit: "#metric-gross-profit",
         gross_loss: "#metric-gross-loss", win_rate: "#metric-win-rate",
         profit_factor: "#metric-profit-factor", payoff: "#metric-payoff",
@@ -179,7 +184,10 @@
       };
 
       function formatMetric(name, value) {
-        if (value === null) return "—";
+        if (!Number.isFinite(value)) return "—";
+        if (["sample_size", "winning_trades", "losing_trades"].includes(name)) {
+          return new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 0}).format(value);
+        }
         if (name === "win_rate") {
           return new Intl.NumberFormat("pt-BR", {style: "percent", minimumFractionDigits: 2,
             maximumFractionDigits: 2}).format(value);

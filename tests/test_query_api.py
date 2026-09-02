@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+from algobotdash.metrics import _finite_ratio  # pylint: disable=protected-access
 from algobotdash.storage import SCHEMA, read_positions
 from algobotdash.web import app
 from tests.fixture_helpers import get_asgi, insert_positions
@@ -187,7 +188,6 @@ class QueryApiTests(unittest.TestCase):
             )
 
         response = self._request("/api/metrics")
-
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["sample_size"], 4)
@@ -195,6 +195,7 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(payload["net_pnl"], 80)
         self.assertEqual(payload["gross_profit"], 120)
         self.assertEqual(payload["gross_loss"], -40)
+        self.assertEqual((payload["winning_trades"], payload["losing_trades"]), (2, 1))
         self.assertEqual(payload["win_rate"], 0.5)
         self.assertEqual(payload["profit_factor"], 3)
         self.assertEqual(payload["payoff"], 1.5)
@@ -216,6 +217,7 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(payload["net_pnl"], 0)
         self.assertEqual(payload["gross_profit"], 0)
         self.assertEqual(payload["gross_loss"], 0)
+        self.assertEqual((payload["winning_trades"], payload["losing_trades"]), (0, 0))
         for metric in (
             "win_rate", "profit_factor", "payoff", "expectancy",
             "sharpe_per_position", "sortino_per_position",
@@ -359,8 +361,9 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(open_positions.json()["sample_size"], 0)
         self.assertEqual(open_positions.json()["excluded_open_positions"], 1)
         for metric in (
-            "net_pnl", "gross_profit", "gross_loss", "win_rate", "profit_factor",
-            "payoff", "expectancy", "sharpe_per_position", "sortino_per_position",
+            "net_pnl", "gross_profit", "gross_loss", "winning_trades", "losing_trades",
+            "win_rate", "profit_factor", "payoff", "expectancy",
+            "sharpe_per_position", "sortino_per_position",
         ):
             with self.subTest(metric=metric):
                 self.assertIsNone(open_positions.json()[metric])
@@ -553,6 +556,8 @@ class QueryApiTests(unittest.TestCase):
                     response.json()["unavailable_reasons"][metric],
                     "numeric_overflow",
                 )
+        self.assertIsNone(_finite_ratio(1.0, 0.0))
+        self.assertIsNone(_finite_ratio(1.0, -0.0))
 
     def test_metrics_isolate_standard_deviation_overflow(self) -> None:
         """Keep representable metrics when only sample deviation overflows."""
