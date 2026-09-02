@@ -229,13 +229,13 @@
           const el = document.querySelector(id);
           if (el) el.textContent = val;
         };
-        setVal("#metric-net-pnl", formatDecimal(data.net_pnl, 2));
-        setVal("#metric-gross-profit", formatDecimal(data.gross_profit, 2));
-        setVal("#metric-gross-loss", formatDecimal(data.gross_loss, 2));
+        setVal("#metric-net-pnl", formatPnl(data.net_pnl));
+        setVal("#metric-gross-profit", formatPnl(data.gross_profit));
+        setVal("#metric-gross-loss", formatPnl(data.gross_loss));
         setVal("#metric-win-rate", formatPercent(data.win_rate, 2));
         setVal("#metric-profit-factor", formatDecimal(data.profit_factor, 3));
         setVal("#metric-payoff", formatDecimal(data.payoff, 3));
-        setVal("#metric-expectancy", formatDecimal(data.expectancy, 2));
+        setVal("#metric-expectancy", formatPnl(data.expectancy));
         setVal("#metric-position-sharpe", formatDecimal(data.position_sharpe, 3));
         setVal("#metric-position-sortino", formatDecimal(data.position_sortino, 3));
         setVal("#metric-max-depth-depth", formatDecimal(data.max_depth_episode?.depth, 2));
