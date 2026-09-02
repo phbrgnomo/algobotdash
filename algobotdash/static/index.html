@@ -12,12 +12,15 @@
       dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
       dt, small { color: #9eabb4; } dd { margin: 0; overflow-wrap: anywhere; }
       .ok { color: #59d69b; } .warn { color: #f5c15d; } .error { color: #ff7b86; }
-      #error, #filter-state, #table-state { margin-top: 16px; color: #ffb4ba; }
+      #error, #filter-state, #table-state, #metrics-state { margin-top: 16px; color: #ffb4ba; }
       .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
       .controls, .filters, .pagination { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
       .filters { border: 0; border-top: 1px solid #34414a; margin-top: 16px; padding: 16px 0 0; }
       .filters legend { color: #9eabb4; padding: 0 8px 0 0; }
       .filters label { color: #9eabb4; font-size: 14px; }
+      .metrics-grid { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 16px; }
+      .metric-card { background: #24323b; border-radius: 6px; padding: 14px; }
+      .metric-card strong { display: block; font-size: 22px; margin-top: 6px; }
       button, input, select { background: #24323b; border: 1px solid #50616c; border-radius: 4px; color: inherit; padding: 7px 10px; }
       button:disabled { cursor: not-allowed; opacity: .5; }
       .table-wrap { overflow-x: auto; }
@@ -25,7 +28,7 @@
       th, td { border-bottom: 1px solid #34414a; padding: 10px 8px; text-align: left; white-space: nowrap; }
       th { color: #9eabb4; font-weight: 600; }
       .numeric { text-align: right; }
-      @media (max-width: 640px) { dl { grid-template-columns: 1fr; } main { padding: 0 16px; } }
+      @media (max-width: 640px) { dl, .metrics-grid { grid-template-columns: 1fr; } main { padding: 0 16px; } }
     </style>
   </head>
   <body>
@@ -90,6 +93,22 @@
           <label for="date-to">Até</label><input id="date-to" type="date">
         </fieldset>
         <p id="filter-state" aria-live="polite" hidden></p>
+        <section aria-labelledby="metrics-title">
+          <h3 id="metrics-title">Métricas por posição</h3>
+          <small id="metrics-summary">Consultando métricas...</small>
+          <div class="metrics-grid">
+            <div class="metric-card"><small>P&amp;L líquido</small><strong id="metric-net-pnl">—</strong></div>
+            <div class="metric-card"><small>Ganho bruto</small><strong id="metric-gross-profit">—</strong></div>
+            <div class="metric-card"><small>Perda bruta</small><strong id="metric-gross-loss">—</strong></div>
+            <div class="metric-card"><small>Taxa de acerto</small><strong id="metric-win-rate">—</strong></div>
+            <div class="metric-card"><small>Profit factor</small><strong id="metric-profit-factor">—</strong></div>
+            <div class="metric-card"><small>Payoff</small><strong id="metric-payoff">—</strong></div>
+            <div class="metric-card"><small>Expectância</small><strong id="metric-expectancy">—</strong></div>
+            <div class="metric-card"><small>Sharpe por posição</small><strong id="metric-sharpe-per-position">—</strong></div>
+            <div class="metric-card"><small>Sortino por posição</small><strong id="metric-sortino-per-position">—</strong></div>
+          </div>
+          <p id="metrics-state" aria-live="polite" hidden></p>
+        </section>
         <p id="table-state" role="alert" hidden></p>
         <div class="table-wrap">
           <table>
@@ -122,6 +141,7 @@
       let latestImportKey = null;
       let latestFilterImportKey = null;
       let positionRequestGeneration = 0;
+      let metricRequestGeneration = 0;
       let statusRequestGeneration = 0;
       let filterRequestGeneration = 0;
 
@@ -137,6 +157,63 @@
 
       function formatPnl(value) {
         return value === null ? "—" : new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 2}).format(value);
+      }
+
+      const metricIds = {
+        net_pnl: "#metric-net-pnl", gross_profit: "#metric-gross-profit",
+        gross_loss: "#metric-gross-loss", win_rate: "#metric-win-rate",
+        profit_factor: "#metric-profit-factor", payoff: "#metric-payoff",
+        expectancy: "#metric-expectancy", sharpe_per_position: "#metric-sharpe-per-position",
+        sortino_per_position: "#metric-sortino-per-position",
+      };
+
+      const metricReasonLabels = {
+        empty_sample: "A amostra não contém posições realizadas.",
+        insufficient_sample: "São necessárias pelo menos duas posições realizadas.",
+        no_winning_positions: "A amostra não contém posições vencedoras.",
+        no_losing_positions: "A amostra não contém posições perdedoras.",
+        zero_standard_deviation: "Os resultados não possuem dispersão.",
+        zero_downside_deviation: "A amostra não possui dispersão negativa.",
+        numeric_overflow: "A razão excede o limite numérico disponível.",
+        realized_metrics_unavailable_for_open_status: "Métricas realizadas ficam indisponíveis para o filtro de posições abertas.",
+      };
+
+      function formatMetric(name, value) {
+        if (value === null) return "—";
+        if (name === "win_rate") {
+          return new Intl.NumberFormat("pt-BR", {style: "percent", minimumFractionDigits: 2,
+            maximumFractionDigits: 2}).format(value);
+        }
+        const digits = ["profit_factor", "payoff", "sharpe_per_position",
+          "sortino_per_position"].includes(name) ? 3 : 2;
+        return new Intl.NumberFormat("pt-BR", {minimumFractionDigits: digits,
+          maximumFractionDigits: digits}).format(value);
+      }
+
+      function renderMetrics(data) {
+        Object.entries(metricIds).forEach(([name, selector]) => {
+          const element = document.querySelector(selector);
+          element.textContent = formatMetric(name, data[name]);
+          element.title = data.unavailable_reasons[name]
+            ? metricReasonLabels[data.unavailable_reasons[name]] : "";
+        });
+        const excluded = data.excluded_open_positions
+          ? `; ${data.excluded_open_positions} abertas excluídas` : "";
+        document.querySelector("#metrics-summary").textContent =
+          `${data.sample_size} posições realizadas${excluded}.`;
+        const reasons = [...new Set(Object.values(data.unavailable_reasons))]
+          .map((reason) => metricReasonLabels[reason] || reason);
+        setNotice("#metrics-state", reasons.join(" "), reasons.length > 0);
+      }
+
+      function clearMetrics(message) {
+        Object.values(metricIds).forEach((selector) => {
+          const element = document.querySelector(selector);
+          element.textContent = "—";
+          element.title = "";
+        });
+        document.querySelector("#metrics-summary").textContent = message;
+        setNotice("#metrics-state", message, true);
       }
 
       function setNotice(id, message, visible) {
@@ -187,20 +264,38 @@
         setNotice("#table-state", "", false);
       }
 
-      async function loadPositions() {
-        const requestGeneration = ++positionRequestGeneration;
-        if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
-          setNotice("#table-state", "Atenção: a data inicial deve ser anterior ou igual à data final.", true);
-          return "handled";
-        }
-        const query = new URLSearchParams({limit: page.limit, offset: page.offset,
-          sort_by: sortBy.value, sort_order: sortOrder.value});
+      function buildFilterQuery() {
+        const query = new URLSearchParams();
         [["strategy", filterStrategy.value], ["symbol_family", filterSymbolFamily.value],
           ["direction", filterDirection.value], ["status", filterStatus.value],
           ["association", filterAssociation.value === "all" ? "" : filterAssociation.value],
           ["date_from", dateFrom.value], ["date_to", dateTo.value]].forEach(([name, value]) => {
           if (value) query.set(name, value);
         });
+        return query;
+      }
+
+      function filterError(response, code) {
+        const messages = {
+          invalid_date_range: "A data inicial deve ser anterior ou igual à data final.",
+          contradictory_filters: "Uma estratégia não pode ser combinada com posições não associadas.",
+        };
+        const error = new Error(messages[code] || `HTTP ${response.status}`);
+        error.retryable = response.status === undefined || response.status >= 500;
+        return error;
+      }
+
+      async function loadPositions(filterQuery = buildFilterQuery()) {
+        const requestGeneration = ++positionRequestGeneration;
+        if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+          setNotice("#table-state", "Atenção: a data inicial deve ser anterior ou igual à data final.", true);
+          return "handled";
+        }
+        const query = new URLSearchParams(filterQuery);
+        query.set("limit", page.limit);
+        query.set("offset", page.offset);
+        query.set("sort_by", sortBy.value);
+        query.set("sort_order", sortOrder.value);
         try {
           const response = await fetch(`/api/positions?${query}`, {cache: "no-store"});
           if (!response.ok) {
@@ -211,13 +306,7 @@
             } catch (_error) {
               // A response body is optional; the HTTP status remains useful.
             }
-            const messages = {
-              invalid_date_range: "A data inicial deve ser anterior ou igual à data final.",
-              contradictory_filters: "Uma estratégia não pode ser combinada com posições não associadas.",
-            };
-            const error = new Error(messages[code] || `HTTP ${response.status}`);
-            error.retryable = response.status === undefined || response.status >= 500;
-            throw error;
+            throw filterError(response, code);
           }
           const data = await response.json();
           if (requestGeneration !== positionRequestGeneration) return false;
@@ -236,6 +325,60 @@
           }
           return "handled";
         }
+      }
+
+      async function loadMetrics(filterQuery = buildFilterQuery()) {
+        const requestGeneration = ++metricRequestGeneration;
+        const query = new URLSearchParams(filterQuery);
+        try {
+          const response = await fetch(`/api/metrics?${query}`, {cache: "no-store"});
+          if (!response.ok) {
+            let code = null;
+            try {
+              const payload = await response.json();
+              code = payload.detail?.code || null;
+            } catch (_error) {
+              // The status is sufficient when the response has no JSON body.
+            }
+            throw filterError(response, code);
+          }
+          const data = await response.json();
+          if (requestGeneration !== metricRequestGeneration) return false;
+          renderMetrics(data);
+          return true;
+        } catch (error) {
+          if (requestGeneration !== metricRequestGeneration) return false;
+          clearMetrics(`Métricas indisponíveis (${error.message}).`);
+          if (error.retryable !== false) {
+            latestImportKey = null;
+            return false;
+          }
+          return "handled";
+        }
+      }
+
+      async function loadFilteredSample() {
+        if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+          positionRequestGeneration += 1;
+          metricRequestGeneration += 1;
+          const message = "Atenção: a data inicial deve ser anterior ou igual à data final.";
+          setNotice("#table-state", message, true);
+          clearMetrics(message);
+          return "handled";
+        }
+        const filterQuery = buildFilterQuery();
+        document.querySelector("#positions-body").replaceChildren();
+        document.querySelector("#page-summary").textContent = "Consultando posições...";
+        document.querySelector("#previous-page").disabled = true;
+        document.querySelector("#next-page").disabled = true;
+        setNotice("#table-state", "", false);
+        clearMetrics("Consultando métricas...");
+        const [positionsLoaded, metricsLoaded] = await Promise.all([
+          loadPositions(filterQuery), loadMetrics(filterQuery),
+        ]);
+        if (positionsLoaded === true && metricsLoaded === true) return true;
+        if (positionsLoaded === "handled" || metricsLoaded === "handled") return "handled";
+        return false;
       }
 
       function replaceDynamicOptions(select, values, allLabel) {
@@ -292,20 +435,23 @@
             }
             if (importKey !== latestImportKey) {
               page.offset = 0;
-              const loaded = await loadPositions();
+              const loaded = await loadFilteredSample();
               if (requestGeneration !== statusRequestGeneration) return;
               if (loaded === true || loaded === "handled") latestImportKey = importKey;
             }
           }
           if (data.state === "empty") {
             positionRequestGeneration += 1;
+            metricRequestGeneration += 1;
             filterRequestGeneration += 1;
             latestImportKey = null;
             latestFilterImportKey = null;
             renderPositions({items: [], total: 0});
+            clearMetrics("Nenhuma importação válida.");
           }
           if (data.state === "unavailable") {
             positionRequestGeneration += 1;
+            metricRequestGeneration += 1;
             filterRequestGeneration += 1;
             latestImportKey = null;
             latestFilterImportKey = null;
@@ -314,6 +460,7 @@
             document.querySelector("#previous-page").disabled = true;
             document.querySelector("#next-page").disabled = true;
             setNotice("#table-state", "Atenção: a projeção SQLite está indisponível.", true);
+            clearMetrics("Projeção indisponível.");
           }
         } catch (error) {
           if (requestGeneration !== statusRequestGeneration) return;
@@ -334,7 +481,7 @@
             filterAssociation.value = "all";
           }
           page.offset = 0;
-          loadPositions();
+          loadFilteredSample();
         });
       });
       document.querySelector("#previous-page").addEventListener("click", () => {

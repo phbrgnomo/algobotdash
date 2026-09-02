@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import shutil
 import sqlite3
+import sys
 import tempfile
 import unittest
 from collections.abc import Iterator
@@ -16,6 +18,8 @@ from algobotdash.web import app
 from tests.fixture_helpers import get_asgi, insert_positions
 
 
+# The integration seam intentionally covers every public read-only API behavior.
+# pylint: disable=too-many-public-methods
 class QueryApiTests(unittest.TestCase):
     """Verify externally visible position and projection query behavior."""
 
@@ -161,6 +165,497 @@ class QueryApiTests(unittest.TestCase):
             [item["position_id"] for item in unassociated.json()["items"]], ["200"]
         )
         self.assertEqual(unassociated.json()["items"][0]["association"], "unassociated")
+
+    def test_metrics_calculate_realized_position_statistics(self) -> None:
+        """Expose the agreed realized metrics for one controlled P&L sample."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 4, 4, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        str(position_id), "Turtle", "WIN", "WINQ26", "buy",
+                        f"2026-08-0{position_id}T10:00:00-03:00",
+                        f"2026-08-0{position_id}T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, pnl, 1, 1,
+                    )
+                    for position_id, pnl in enumerate((100, -40, 0, 20), start=1)
+                ],
+            )
+
+        response = self._request("/api/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["sample_size"], 4)
+        self.assertEqual(payload["excluded_open_positions"], 0)
+        self.assertEqual(payload["net_pnl"], 80)
+        self.assertEqual(payload["gross_profit"], 120)
+        self.assertEqual(payload["gross_loss"], -40)
+        self.assertEqual(payload["win_rate"], 0.5)
+        self.assertEqual(payload["profit_factor"], 3)
+        self.assertEqual(payload["payoff"], 1.5)
+        self.assertEqual(payload["expectancy"], 20)
+        self.assertAlmostEqual(payload["sharpe_per_position"], 0.3396831102433787)
+        self.assertEqual(payload["sortino_per_position"], 1)
+        self.assertEqual(payload["unavailable_reasons"], {})
+
+    def test_metrics_keep_empty_realized_sums_available(self) -> None:
+        """Distinguish an empty realized sample from unavailable metrics."""
+        self._seed_projection()
+
+        response = self._request("/api/metrics?strategy=Missing")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["sample_size"], 0)
+        self.assertEqual(payload["excluded_open_positions"], 0)
+        self.assertEqual(payload["net_pnl"], 0)
+        self.assertEqual(payload["gross_profit"], 0)
+        self.assertEqual(payload["gross_loss"], 0)
+        for metric in (
+            "win_rate", "profit_factor", "payoff", "expectancy",
+            "sharpe_per_position", "sortino_per_position",
+        ):
+            with self.subTest(metric=metric):
+                self.assertIsNone(payload[metric])
+                self.assertEqual(payload["unavailable_reasons"][metric], "empty_sample")
+
+    def test_metrics_explain_absent_losses_and_downside(self) -> None:
+        """Return finite values and stable reasons when no outcome is negative."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        "1", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-08-01T10:00:00-03:00", "2026-08-01T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 10, 1, 1,
+                    ),
+                    (
+                        "2", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-08-02T10:00:00-03:00", "2026-08-02T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 20, 1, 1,
+                    ),
+                ],
+            )
+
+        payload = self._request("/api/metrics").json()
+
+        self.assertIsNone(payload["profit_factor"])
+        self.assertEqual(payload["unavailable_reasons"]["profit_factor"], "no_losing_positions")
+        self.assertIsNone(payload["payoff"])
+        self.assertEqual(payload["unavailable_reasons"]["payoff"], "no_losing_positions")
+        self.assertIsNone(payload["sortino_per_position"])
+        self.assertEqual(
+            payload["unavailable_reasons"]["sortino_per_position"],
+            "zero_downside_deviation",
+        )
+        self.assertNotIn("sharpe_per_position", payload["unavailable_reasons"])
+
+    def test_metrics_explain_absent_wins(self) -> None:
+        """Keep profit factor finite while payoff has no winning denominator."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        str(position_id), "Turtle", "WIN", "WINQ26", "buy",
+                        f"2026-08-0{position_id}T10:00:00-03:00",
+                        f"2026-08-0{position_id}T11:00:00-03:00",
+                        "closed", 1, 1, 100, 99, 0, 0, pnl, 1, 1,
+                    )
+                    for position_id, pnl in enumerate((-10, -20), start=1)
+                ],
+            )
+
+        payload = self._request("/api/metrics").json()
+
+        self.assertEqual(payload["profit_factor"], 0)
+        self.assertIsNone(payload["payoff"])
+        self.assertEqual(payload["unavailable_reasons"]["payoff"], "no_winning_positions")
+        self.assertNotIn("profit_factor", payload["unavailable_reasons"])
+
+    def test_metrics_require_two_positions_for_distribution_ratios(self) -> None:
+        """Do not present Sharpe or Sortino for a single realized position."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 1, 1, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [(
+                    "1", "Turtle", "WIN", "WINQ26", "buy",
+                    "2026-08-01T10:00:00-03:00", "2026-08-01T11:00:00-03:00",
+                    "closed", 1, 1, 100, 99, 0, 0, -10, 1, 1,
+                )],
+            )
+
+        payload = self._request("/api/metrics").json()
+
+        self.assertIsNone(payload["sharpe_per_position"])
+        self.assertIsNone(payload["sortino_per_position"])
+        self.assertEqual(
+            payload["unavailable_reasons"]["sharpe_per_position"],
+            "insufficient_sample",
+        )
+        self.assertEqual(
+            payload["unavailable_reasons"]["sortino_per_position"],
+            "insufficient_sample",
+        )
+
+    def test_metrics_explain_zero_standard_deviation(self) -> None:
+        """Return a reason instead of infinity for identical outcomes."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        str(position_id), "Turtle", "WIN", "WINQ26", "buy",
+                        f"2026-08-0{position_id}T10:00:00-03:00",
+                        f"2026-08-0{position_id}T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 5, 1, 1,
+                    )
+                    for position_id in (1, 2)
+                ],
+            )
+
+        payload = self._request("/api/metrics").json()
+
+        self.assertIsNone(payload["sharpe_per_position"])
+        self.assertEqual(
+            payload["unavailable_reasons"]["sharpe_per_position"],
+            "zero_standard_deviation",
+        )
+
+    def test_metrics_distinguish_all_and_open_status(self) -> None:
+        """Count excluded opens for all and make open metrics unavailable."""
+        self._seed_projection()
+
+        all_positions = self._request("/api/metrics?status=all")
+        open_positions = self._request("/api/metrics?status=open")
+
+        self.assertEqual(all_positions.status_code, 200)
+        self.assertEqual(all_positions.json()["sample_size"], 2)
+        self.assertEqual(all_positions.json()["excluded_open_positions"], 1)
+        self.assertEqual(all_positions.json()["net_pnl"], -12)
+        self.assertEqual(open_positions.status_code, 200)
+        self.assertEqual(open_positions.json()["sample_size"], 0)
+        self.assertEqual(open_positions.json()["excluded_open_positions"], 1)
+        for metric in (
+            "net_pnl", "gross_profit", "gross_loss", "win_rate", "profit_factor",
+            "payoff", "expectancy", "sharpe_per_position", "sortino_per_position",
+        ):
+            with self.subTest(metric=metric):
+                self.assertIsNone(open_positions.json()[metric])
+                self.assertEqual(
+                    open_positions.json()["unavailable_reasons"][metric],
+                    "realized_metrics_unavailable_for_open_status",
+                )
+
+    def test_metrics_apply_shared_filters_without_assigning_unassociated_strategy(self) -> None:
+        """Include unassociated totals but require association for strategy metrics."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 4, 4, 1, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        "1", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-08-01T10:00:00-03:00", "2026-08-01T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 10, 1, 1,
+                    ),
+                    (
+                        "2", "Turtle", "WDO", "WDOQ26", "sell",
+                        "2026-08-02T10:00:00-03:00", "2026-08-02T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 20, 0, 1,
+                    ),
+                    (
+                        "3", "FVG", "WIN", "WINQ26", "sell",
+                        "2026-08-03T10:00:00-03:00", "2026-08-03T11:00:00-03:00",
+                        "closed", 1, 1, 100, 99, 0, 0, -5, 1, 1,
+                    ),
+                    (
+                        "4", None, "WDO", "WDOQ26", "sell",
+                        "2026-08-02T12:00:00-03:00", None,
+                        "open", 1, 1, 100, None, 0, 0, 999, 0, 1,
+                    ),
+                ],
+            )
+
+        general = self._request("/api/metrics")
+        strategy = self._request("/api/metrics?strategy=Turtle")
+        unassociated = self._request(
+            "/api/metrics?status=all&association=unassociated&symbol_family=WDO"
+            "&direction=sell&date_from=2026-08-02&date_to=2026-08-02"
+        )
+
+        self.assertEqual(general.json()["sample_size"], 3)
+        self.assertEqual(general.json()["net_pnl"], 25)
+        self.assertEqual(strategy.json()["sample_size"], 1)
+        self.assertEqual(strategy.json()["net_pnl"], 10)
+        self.assertEqual(unassociated.json()["sample_size"], 1)
+        self.assertEqual(unassociated.json()["net_pnl"], 20)
+        self.assertEqual(unassociated.json()["excluded_open_positions"], 1)
+
+    def test_each_metrics_filter_is_independently_effective(self) -> None:
+        """Make every shared metric predicate observable against control rows."""
+        self._seed_projection()
+
+        strategy = self._request("/api/metrics?status=all&strategy=Turtle").json()
+        symbol = self._request("/api/metrics?status=all&symbol_family=WDO").json()
+        direction = self._request("/api/metrics?status=all&direction=sell").json()
+        associated = self._request(
+            "/api/metrics?status=all&association=associated"
+        ).json()
+        unassociated = self._request(
+            "/api/metrics?status=all&association=unassociated"
+        ).json()
+        period = self._request(
+            "/api/metrics?status=all&date_from=2026-08-03&date_to=2026-08-03"
+        ).json()
+        upper_bound = self._request(
+            "/api/metrics?status=all&date_to=2026-08-01"
+        ).json()
+
+        self.assertEqual((strategy["sample_size"], strategy["net_pnl"]), (1, 9))
+        self.assertEqual(
+            (symbol["sample_size"], symbol["excluded_open_positions"]), (0, 1)
+        )
+        self.assertEqual(
+            (direction["sample_size"], direction["excluded_open_positions"]),
+            (0, 1),
+        )
+        self.assertEqual(
+            (associated["sample_size"], associated["excluded_open_positions"]),
+            (2, 0),
+        )
+        self.assertEqual(
+            (unassociated["sample_size"], unassociated["excluded_open_positions"]),
+            (0, 1),
+        )
+        self.assertEqual(
+            (period["sample_size"], period["net_pnl"], period["excluded_open_positions"]),
+            (1, -21, 0),
+        )
+        self.assertEqual(
+            (
+                upper_bound["sample_size"],
+                upper_bound["net_pnl"],
+                upper_bound["excluded_open_positions"],
+            ),
+            (1, 9, 0),
+        )
+
+    def test_metrics_reject_additive_numeric_overflow(self) -> None:
+        """Translate an unrepresentable monetary aggregate into the stable 503."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        str(position_id), "Turtle", "WIN", "WINQ26", "buy",
+                        f"2026-08-0{position_id}T10:00:00-03:00",
+                        f"2026-08-0{position_id}T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 1e308, 1, 1,
+                    )
+                    for position_id in (1, 2)
+                ],
+            )
+
+        response = self._request("/api/metrics")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(), {"detail": {"code": "projection_unavailable"}}
+        )
+
+    def test_metrics_keep_extreme_downside_calculation_finite(self) -> None:
+        """Avoid overflow while calculating downside deviation."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        str(position_id), "Turtle", "WIN", "WINQ26", "buy",
+                        f"2026-08-0{position_id}T10:00:00-03:00",
+                        f"2026-08-0{position_id}T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, pnl, 1, 1,
+                    )
+                    for position_id, pnl in enumerate((1e308, -1e308), start=1)
+                ],
+            )
+
+        response = self._request("/api/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        for metric in (
+            "net_pnl", "gross_profit", "gross_loss", "win_rate", "profit_factor",
+            "payoff", "expectancy", "sharpe_per_position", "sortino_per_position",
+        ):
+            with self.subTest(metric=metric):
+                self.assertTrue(math.isfinite(response.json()[metric]))
+
+    def test_metrics_explain_nonrepresentable_ratios(self) -> None:
+        """Return null with an explicit reason instead of infinite ratios."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        str(position_id), "Turtle", "WIN", "WINQ26", "buy",
+                        f"2026-08-0{position_id}T10:00:00-03:00",
+                        f"2026-08-0{position_id}T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, pnl, 1, 1,
+                    )
+                    for position_id, pnl in enumerate((1e308, -5e-324), start=1)
+                ],
+            )
+
+        response = self._request("/api/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        for metric in ("profit_factor", "payoff", "sortino_per_position"):
+            with self.subTest(metric=metric):
+                self.assertIsNone(response.json()[metric])
+                self.assertEqual(
+                    response.json()["unavailable_reasons"][metric],
+                    "numeric_overflow",
+                )
+
+    def test_metrics_isolate_standard_deviation_overflow(self) -> None:
+        """Keep representable metrics when only sample deviation overflows."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        str(position_id), "Turtle", "WIN", "WINQ26", "buy",
+                        f"2026-08-0{position_id}T10:00:00-03:00",
+                        f"2026-08-0{position_id}T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, pnl, 1, 1,
+                    )
+                    for position_id, pnl in enumerate(
+                        (sys.float_info.max, -sys.float_info.max), start=1
+                    )
+                ],
+            )
+
+        response = self._request("/api/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["sharpe_per_position"])
+        self.assertEqual(
+            response.json()["unavailable_reasons"]["sharpe_per_position"],
+            "numeric_overflow",
+        )
+        for metric in (
+            "net_pnl", "gross_profit", "gross_loss", "win_rate", "profit_factor",
+            "payoff", "expectancy", "sortino_per_position",
+        ):
+            with self.subTest(metric=metric):
+                self.assertTrue(math.isfinite(response.json()[metric]))
+
+    def test_metrics_validate_the_shared_filter_contract(self) -> None:
+        """Use the same validation and empty-sample behavior as positions."""
+        self._seed_projection()
+
+        inverted = self._request(
+            "/api/metrics?date_from=2026-08-03&date_to=2026-08-01"
+        )
+        contradictory = self._request(
+            "/api/metrics?strategy=Turtle&association=unassociated"
+        )
+        blank = self._request("/api/metrics?symbol_family=%20%20")
+        unknown = self._request("/api/metrics?strategy=Missing")
+
+        self.assertEqual(inverted.status_code, 422)
+        self.assertEqual(inverted.json()["detail"]["code"], "invalid_date_range")
+        self.assertEqual(contradictory.status_code, 422)
+        self.assertEqual(
+            contradictory.json()["detail"]["code"], "contradictory_filters"
+        )
+        self.assertEqual(blank.status_code, 422)
+        self.assertEqual(unknown.status_code, 200)
+        self.assertEqual(unknown.json()["sample_size"], 0)
+        self.assertEqual(
+            self._request("/api/metrics?direction=sideways").status_code, 422
+        )
+        self.assertEqual(
+            self._request("/api/metrics?status=finished").status_code, 422
+        )
+        self.assertEqual(
+            self._request("/api/metrics?association=maybe").status_code, 422
+        )
+
+    def test_metrics_reject_malformed_projection(self) -> None:
+        """Expose the stable projection error instead of partial metrics."""
+        self.database_path.write_bytes(b"not a sqlite database")
+
+        response = self._request("/api/metrics")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(), {"detail": {"code": "projection_unavailable"}}
+        )
+
+    def test_metrics_reject_invalid_pnl_in_projection(self) -> None:
+        """Translate a malformed persisted P&L into the stable projection error."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 1, 1, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [(
+                    "1", "Turtle", "WIN", "WINQ26", "buy",
+                    "2026-08-01T10:00:00-03:00", "2026-08-01T11:00:00-03:00",
+                    "closed", 1, 1, 100, 101, 0, 0, "not-a-number", 1, 1,
+                )],
+            )
+
+        response = self._request("/api/metrics")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(), {"detail": {"code": "projection_unavailable"}}
+        )
 
     def test_each_shared_filter_is_independently_effective(self) -> None:
         """Prove every dimension against rows that differ on the other dimensions."""
