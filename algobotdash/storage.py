@@ -309,8 +309,8 @@ def read_positions(
         raise ValueError("ordenação de posições inválida") from exc
     active_filters = filters or PositionFilters()
     where_sql, parameters = _position_where(active_filters)
-    query = (  # nosec B608 -- column and order come from fixed allowlists
-        "SELECT position_id, strategy, symbol_family, "
+    query = (  # Fixed predicates and allowlisted ordering; values stay parameterized.
+        "SELECT position_id, strategy, symbol_family, "  # noqa: S608  # nosec B608
         "CASE WHEN strategy IS NOT NULL AND symbol_family IS NOT NULL "
         "THEN symbol_family || ' ' || strategy END AS strategy_key, "
         "CASE WHEN is_associated = 1 THEN 'associated' ELSE 'unassociated' "
@@ -326,7 +326,7 @@ def read_positions(
         rows, total = _page_rows(
             connection,
             query,
-            f"SELECT COUNT(*) FROM positions {where_sql}",
+            f"SELECT COUNT(*) FROM positions {where_sql}",  # noqa: S608  # nosec B608
             limit,
             offset,
             parameters,

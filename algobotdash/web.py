@@ -98,13 +98,13 @@ def _optional_dimension(value: str | None, name: str) -> str | None:
     """Strip an optional dimension and reject whitespace-only input."""
     if value is None:
         return None
-    normalized = value.strip()
-    if not normalized:
+    if normalized := value.strip():
+        return normalized
+    else:
         raise HTTPException(
             status_code=422,
             detail={"code": "invalid_filter", "field": name},
         )
-    return normalized
 
 
 def _status_state() -> dict[str, Any]:
