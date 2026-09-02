@@ -242,6 +242,7 @@
         const requestGeneration = ++metricsRequestGeneration;
         if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
           setNotice("#metrics-state", "Atenção: a data inicial deve ser anterior ou igual à data final.", true);
+          resetMetrics();
           return "handled";
         }
         const query = new URLSearchParams();
