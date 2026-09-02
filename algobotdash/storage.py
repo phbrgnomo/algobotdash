@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -344,6 +345,7 @@ def _position_where(filters: PositionFilters) -> tuple[str, tuple[object, ...]]:
     if filters.strategy is not None:
         clauses.append("strategy = ?")
         parameters.append(filters.strategy)
+        clauses.append("is_associated = 1")
     if filters.symbol_family is not None:
         clauses.append("symbol_family = ?")
         parameters.append(filters.symbol_family)
@@ -388,6 +390,33 @@ def read_filter_options(path: Path) -> dict[str, list[str]]:
         except sqlite3.Error as exc:
             raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
         return {"strategies": strategies, "symbol_families": symbol_families}
+    finally:
+        connection.close()
+
+
+def read_position_metric_sample(
+    path: Path, filters: PositionFilters
+) -> tuple[list[float], int]:
+    """Return realized P&L values and open positions excluded by the filters."""
+    where_sql, parameters = _position_where(filters)
+    connection = _open_projection(path)
+    try:
+        try:
+            rows = connection.execute(
+                f"SELECT status, pnl FROM positions {where_sql}",  # noqa: S608  # nosec B608
+                parameters,
+            ).fetchall()
+            pnl_values = []
+            for row in rows:
+                if row["status"] == "closed":
+                    pnl = float(row["pnl"])
+                    if not math.isfinite(pnl):
+                        raise ValueError("P&L não finito")
+                    pnl_values.append(pnl)
+            excluded_open_positions = sum(row["status"] == "open" for row in rows)
+        except (sqlite3.Error, TypeError, ValueError, OverflowError) as exc:
+            raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
+        return pnl_values, excluded_open_positions
     finally:
         connection.close()
 

@@ -80,6 +80,7 @@ class WebTests(unittest.TestCase):
         self.assertIn('fetch("/api/status"', content)
         self.assertIn('fetch("/api/filter-options"', content)
         self.assertIn("/api/positions?${query}", content)
+        self.assertIn("/api/metrics?${query}", content)
         self.assertIn('id="filter-strategy"', content)
         self.assertIn('id="filter-symbol-family"', content)
         self.assertIn('id="filter-direction"', content)
@@ -94,6 +95,12 @@ class WebTests(unittest.TestCase):
         self.assertIn('<legend>Filtros das posições</legend>', content)
         self.assertIn('id="filter-state" aria-live="polite"', content)
         self.assertIn('id="table-state" role="alert"', content)
+        self.assertIn('id="metrics-state" aria-live="polite"', content)
+        self.assertIn('id="metric-sample-size"', content)
+        self.assertIn('id="metric-winning-trades"', content)
+        self.assertIn('id="metric-losing-trades"', content)
+        self.assertIn('id="metric-net-pnl"', content)
+        self.assertIn('id="metric-sortino-per-position"', content)
         self.assertIn("Projeção indisponível.", content)
 
     @unittest.skipUnless(NODE_EXECUTABLE, "requires Node.js for JavaScript execution")
@@ -114,7 +121,11 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
   "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
   "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
-  "filter-association", "date-from", "date-to"];
+  "filter-association", "date-from", "date-to", "metrics-summary", "metrics-state",
+  "metric-sample-size", "metric-winning-trades", "metric-losing-trades",
+  "metric-net-pnl", "metric-gross-profit", "metric-gross-loss", "metric-win-rate",
+  "metric-profit-factor", "metric-payoff", "metric-expectancy",
+  "metric-sharpe-per-position", "metric-sortino-per-position"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -124,9 +135,21 @@ let interval;
 let state = "ready";
 let positionFetches = 0;
 let positionMode = "normal";
+let metricMode = "normal";
 let filterMode = "normal";
 const pendingPositions = [];
+const pendingMetrics = [];
 const pendingFilters = [];
+const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
+  gross_profit: 20, gross_loss: -10, winning_trades: 1, losing_trades: 1,
+  win_rate: 0.5, profit_factor: 2, payoff: 2,
+  expectancy: 5, sharpe_per_position: 0.5, sortino_per_position: 0.5,
+  unavailable_reasons: {}};
+const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: null,
+  gross_profit: null, gross_loss: null, winning_trades: null, losing_trades: null,
+  win_rate: null, profit_factor: null, payoff: null,
+  expectancy: null, sharpe_per_position: null, sortino_per_position: null,
+  unavailable_reasons: {net_pnl: "realized_metrics_unavailable_for_open_status"}};
 const statusPayload = () => ({state, configuration: "valid", source: "available",
   projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
   last_import: state === "ready" ? {source_hash: "hash", imported_at: "2026-08-01T00:00:00Z"} : null});
@@ -138,6 +161,10 @@ const context = {
       if (filterMode === "pending") return new Promise((resolve) => pendingFilters.push(resolve));
       return {ok: true, status: 200, json: async () => ({strategies: ["Turtle"], symbol_families: ["WIN"]})};
     }
+    if (url.startsWith("/api/metrics?")) {
+      if (metricMode === "pending") return new Promise((resolve) => pendingMetrics.push(resolve));
+      return {ok: true, status: 200, json: async () => metricPayload};
+    }
     positionFetches += 1;
     if (positionMode === "pending") return new Promise((resolve) => pendingPositions.push(resolve));
     if (positionMode === "validation") return {ok: false, status: 422,
@@ -147,7 +174,7 @@ const context = {
   setInterval: (callback) => { interval = callback; return 1; },
   URLSearchParams, Intl, Date, console,
 };
-vm.runInNewContext(source + "\nglobalThis.loadPositions = loadPositions; globalThis.loadFilterOptions = loadFilterOptions;", context);
+vm.runInNewContext(source + "\nglobalThis.loadPositions = loadPositions; globalThis.loadMetrics = loadMetrics; globalThis.loadFilterOptions = loadFilterOptions;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const watchdog = setTimeout(() => {
   console.error("dashboard regression test did not complete");
@@ -156,8 +183,19 @@ const watchdog = setTimeout(() => {
 (async () => {
   await flush(); await flush();
 
+  metricMode = "pending";
+  elements["#filter-strategy"].value = "Turtle";
+  elements["#filter-strategy"].listeners.change();
+  await flush();
+  if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("old metrics remained visible during a filter change");
+  pendingMetrics.shift()({ok: true, status: 200, json: async () => metricPayload});
+  metricMode = "normal";
+  await flush(); await flush();
+
   positionMode = "pending";
   context.loadPositions();
+  metricMode = "pending";
+  context.loadMetrics();
   filterMode = "pending";
   context.loadFilterOptions();
   state = "unavailable";
@@ -165,12 +203,15 @@ const watchdog = setTimeout(() => {
   pendingPositions[0]({ok: true, status: 200, json: async () => ({items: [{position_id: "stale",
     strategy: "Turtle", association: "associated", symbol_family: "WIN", direction: "buy",
     opened_at: null, closed_at: null, status: "closed", realized_pnl: 1}], total: 1})});
+  pendingMetrics.shift()({ok: true, status: 200, json: async () => ({...metricPayload, net_pnl: 999})});
   pendingFilters[0]({ok: true, status: 200, json: async () => ({strategies: ["Stale"], symbol_families: ["OLD"]})});
   await flush(); await flush();
   if (elements["#page-summary"].textContent !== "Projeção indisponível.") throw new Error("stale position escaped terminal state");
+  if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("stale metric escaped terminal state");
   if (elements["#filter-strategy"].children.some((option) => option.value === "Stale")) throw new Error("stale filter catalog escaped terminal state");
 
   positionMode = "normal";
+  metricMode = "normal";
   elements["#date-from"].value = "2026-08-03";
   elements["#date-to"].value = "2026-08-01";
   const beforeInvalidDates = positionFetches;
@@ -235,7 +276,11 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
   "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
   "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
-  "filter-association", "date-from", "date-to"];
+  "filter-association", "date-from", "date-to", "metrics-summary", "metrics-state",
+  "metric-sample-size", "metric-winning-trades", "metric-losing-trades",
+  "metric-net-pnl", "metric-gross-profit", "metric-gross-loss", "metric-win-rate",
+  "metric-profit-factor", "metric-payoff", "metric-expectancy",
+  "metric-sharpe-per-position", "metric-sortino-per-position"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -248,10 +293,22 @@ let filterFetches = 0;
 let filterPayload = {strategies: ["FVG", "Turtle"], symbol_families: ["WDO", "WIN"]};
 let filterMode = "normal";
 let lastPositionUrl = "";
+let metricFetches = 0;
+let lastMetricUrl = "";
 let mode = "retry";
 const pending = [];
 let statusMode = "normal";
 const pendingStatuses = [];
+const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
+  gross_profit: 20, gross_loss: -10, winning_trades: 1, losing_trades: 1,
+  win_rate: 0.5, profit_factor: 2, payoff: 2,
+  expectancy: 5, sharpe_per_position: 0.5, sortino_per_position: 0.5,
+  unavailable_reasons: {}};
+const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: null,
+  gross_profit: null, gross_loss: null, winning_trades: null, losing_trades: null,
+  win_rate: null, profit_factor: null, payoff: null,
+  expectancy: null, sharpe_per_position: null, sortino_per_position: null,
+  unavailable_reasons: {net_pnl: "realized_metrics_unavailable_for_open_status"}};
 const payload = () => ({state, configuration: "valid", source: "available",
   projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
   last_import: state === "ready" ? {source_hash: "same-hash", imported_at: "2026-08-01T00:00:00+00:00"} : null});
@@ -267,6 +324,11 @@ const context = {
       if (filterMode === "failure") return {ok: false, json: async () => ({})};
       return {ok: true, json: async () => filterPayload};
     }
+    if (url.startsWith("/api/metrics?")) {
+      metricFetches += 1;
+      lastMetricUrl = url;
+      return {ok: true, json: async () => url.includes("status=open") ? openMetricPayload : metricPayload};
+    }
     positionFetches += 1;
     lastPositionUrl = url;
     if (mode === "retry" && positionFetches === 1) return {ok: false, json: async () => ({})};
@@ -277,14 +339,25 @@ const context = {
   setInterval: (callback) => { interval = callback; return 1; },
   URLSearchParams, Intl, Date, console,
 };
-vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus;", context);
+vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus; globalThis.formatMetric = formatMetric;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 (async () => {
   await flush(); await flush();
+  if (context.formatMetric("winning_trades", undefined) !== "—") throw new Error("missing metric rendered as NaN");
   if (filterFetches !== 1) throw new Error(`expected initial filter catalog, got ${filterFetches}`);
   if (!lastPositionUrl.includes("status=closed")) throw new Error(`missing default closed filter: ${lastPositionUrl}`);
+  if (metricFetches !== 1) throw new Error(`expected initial metrics, got ${metricFetches}`);
+  if (elements["#metric-sample-size"].textContent !== "2") throw new Error("operation count formatting mismatch");
+  if (elements["#metric-winning-trades"].textContent !== "1") throw new Error("winning count formatting mismatch");
+  if (elements["#metric-losing-trades"].textContent !== "1") throw new Error("losing count formatting mismatch");
+  if (elements["#metric-net-pnl"].textContent !== "10,00") throw new Error("metric formatting mismatch");
+  if (elements["#metric-gross-loss"].textContent !== "-10,00") throw new Error("gross loss formatting mismatch");
+  if (elements["#metric-win-rate"].textContent !== "50,00%") throw new Error("percentage formatting mismatch");
+  if (elements["#metric-profit-factor"].textContent !== "2,000") throw new Error("ratio formatting mismatch");
+  if (elements["#metrics-summary"].textContent !== "2 posições realizadas.") throw new Error("count formatting mismatch");
   await interval();
   if (positionFetches !== 2) throw new Error(`expected retry after failed load, got ${positionFetches}`);
+  if (metricFetches !== 2) throw new Error(`expected metrics with retry, got ${metricFetches}`);
   state = "unavailable";
   await interval();
   if (elements["#page-summary"].textContent !== "Projeção indisponível.") throw new Error("missing unavailable table state");
@@ -298,9 +371,11 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await interval();
   if (filterFetches !== 3) throw new Error(`expected filter retry, got ${filterFetches}`);
   if (positionFetches !== 4) throw new Error(`expected reload after filter recovery, got ${positionFetches}`);
+  const metricsBeforePagination = metricFetches;
   elements["#next-page"].listeners.click();
   await flush();
   if (!lastPositionUrl.includes("offset=50")) throw new Error(`pagination did not advance: ${lastPositionUrl}`);
+  if (metricFetches !== metricsBeforePagination) throw new Error("pagination reloaded metrics");
   elements["#filter-strategy"].value = "FVG";
   elements["#filter-symbol-family"].value = "WIN";
   elements["#filter-direction"].value = "buy";
@@ -313,10 +388,17 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     "association=associated", "date_from=2026-08-01", "date_to=2026-08-31", "offset=0"]) {
     if (!lastPositionUrl.includes(token)) throw new Error(`missing filter ${token}: ${lastPositionUrl}`);
   }
+  for (const token of ["strategy=FVG", "symbol_family=WIN", "direction=buy",
+    "association=associated", "date_from=2026-08-01", "date_to=2026-08-31"]) {
+    if (!lastMetricUrl.includes(token)) throw new Error(`missing metric filter ${token}: ${lastMetricUrl}`);
+  }
+  if (lastMetricUrl.includes("offset=") || lastMetricUrl.includes("sort_by=")) throw new Error(`table state leaked into metrics: ${lastMetricUrl}`);
   if (elements["#table-state"].hidden !== true || elements["#table-state"].textContent !== "") throw new Error("stale unavailable notice");
   mode = "failure";
+  const metricsBeforeSort = metricFetches;
   elements["#sort-by"].listeners.change();
   await flush();
+  if (metricFetches !== metricsBeforeSort) throw new Error("sorting reloaded metrics");
   mode = "normal";
   await interval();
   if (positionFetches !== 8) throw new Error(`expected retry after active position failure, got ${positionFetches}`);
@@ -345,6 +427,12 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await Promise.all([olderStatus, newerStatus]);
   if (elements["#service"].textContent !== "pronto") throw new Error("stale status overwrote current state");
   if (elements["#filter-strategy"].value !== "") throw new Error("removed strategy selection was preserved");
+  statusMode = "normal";
+  elements["#filter-status"].value = "open";
+  elements["#filter-status"].listeners.change();
+  await flush(); await flush();
+  if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("open status displayed realized P&L");
+  if (!elements["#metrics-state"].textContent.includes("indisponíveis")) throw new Error("open status reason is not visible");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
         node_executable = NODE_EXECUTABLE
