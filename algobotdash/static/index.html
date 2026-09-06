@@ -220,7 +220,8 @@
           element.textContent = "—";
           element.title = "";
         });
-        document.querySelector("#metrics-summary").textContent = message;
+        const summary = document.querySelector("#metrics-summary");
+        if (summary) summary.textContent = message;
         setNotice("#metrics-state", message, true);
       }
 
@@ -293,10 +294,18 @@
         return error;
       }
 
+      function validateDateRange() {
+        if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+          return "A data inicial deve ser anterior ou igual à data final.";
+        }
+        return null;
+      }
+
       async function loadPositions(filterQuery = buildFilterQuery()) {
         const requestGeneration = ++positionRequestGeneration;
-        if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
-          setNotice("#table-state", "Atenção: a data inicial deve ser anterior ou igual à data final.", true);
+        const dateRangeError = validateDateRange();
+        if (dateRangeError) {
+          setNotice("#table-state", `Atenção: ${dateRangeError}`, true);
           return "handled";
         }
         const query = new URLSearchParams(filterQuery);
@@ -337,6 +346,11 @@
 
       async function loadMetrics(filterQuery = buildFilterQuery()) {
         const requestGeneration = ++metricRequestGeneration;
+        const dateRangeError = validateDateRange();
+        if (dateRangeError) {
+          clearMetrics(`Métricas indisponíveis (${dateRangeError}).`);
+          return "handled";
+        }
         const query = new URLSearchParams(filterQuery);
         try {
           const response = await fetch(`/api/metrics?${query}`, {cache: "no-store"});

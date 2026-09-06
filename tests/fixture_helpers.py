@@ -8,8 +8,8 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import httpx
-
 from openpyxl import Workbook
+from starlette.types import ASGIApp
 
 
 _POSITION_INSERT = (
@@ -21,7 +21,7 @@ _POSITION_INSERT = (
 )
 
 
-def get_asgi(app: object, path: str) -> httpx.Response:
+def get_asgi(app: ASGIApp, path: str) -> httpx.Response:
     """Request one path from an ASGI app without opening a network port."""
     async def request() -> httpx.Response:
         transport = httpx.ASGITransport(app=app)

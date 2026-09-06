@@ -618,15 +618,15 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(blank.status_code, 422)
         self.assertEqual(unknown.status_code, 200)
         self.assertEqual(unknown.json()["sample_size"], 0)
-        self.assertEqual(
-            self._request("/api/metrics?direction=sideways").status_code, 422
-        )
-        self.assertEqual(
-            self._request("/api/metrics?status=finished").status_code, 422
-        )
-        self.assertEqual(
-            self._request("/api/metrics?association=maybe").status_code, 422
-        )
+        for field, value in (
+            ("direction", "sideways"), ("status", "finished"),
+            ("association", "maybe"),
+        ):
+            with self.subTest(field=field):
+                response = self._request(f"/api/metrics?{field}={value}")
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json()["detail"][0]["type"], "literal_error")
+                self.assertEqual(response.json()["detail"][0]["loc"], ["query", field])
 
     def test_metrics_reject_malformed_projection(self) -> None:
         """Expose the stable projection error instead of partial metrics."""

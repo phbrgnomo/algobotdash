@@ -339,7 +339,7 @@ const context = {
   setInterval: (callback) => { interval = callback; return 1; },
   URLSearchParams, Intl, Date, console,
 };
-vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus; globalThis.formatMetric = formatMetric;", context);
+vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus; globalThis.formatMetric = formatMetric; globalThis.renderMetrics = renderMetrics;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 (async () => {
   await flush(); await flush();
@@ -433,6 +433,24 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await flush(); await flush();
   if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("open status displayed realized P&L");
   if (!elements["#metrics-state"].textContent.includes("indisponíveis")) throw new Error("open status reason is not visible");
+  context.renderMetrics({...metricPayload, profit_factor: null, payoff: null,
+    sharpe_per_position: null, sortino_per_position: null,
+    unavailable_reasons: {profit_factor: "no_losing_positions", payoff: "no_losing_positions",
+      sharpe_per_position: "insufficient_sample", sortino_per_position: "zero_downside_deviation"}});
+  const unavailableCards = {
+    "#metric-profit-factor": "A amostra não contém posições perdedoras.",
+    "#metric-payoff": "A amostra não contém posições perdedoras.",
+    "#metric-sharpe-per-position": "São necessárias pelo menos duas posições realizadas.",
+    "#metric-sortino-per-position": "A amostra não possui dispersão negativa.",
+  };
+  for (const [selector, title] of Object.entries(unavailableCards)) {
+    if (elements[selector].textContent !== "—") throw new Error(`${selector} displayed an unavailable value`);
+    if (elements[selector].title !== title) throw new Error(`${selector} has the wrong unavailable reason`);
+  }
+  if (elements["#metric-net-pnl"].textContent !== "10,00") throw new Error("available metric was cleared");
+  for (const message of ["posições perdedoras", "pelo menos duas", "dispersão negativa"]) {
+    if (!elements["#metrics-state"].textContent.includes(message)) throw new Error(`missing reason: ${message}`);
+  }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
         node_executable = NODE_EXECUTABLE
