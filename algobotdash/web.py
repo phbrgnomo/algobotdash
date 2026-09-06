@@ -6,21 +6,21 @@ import logging
 import os
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import ConfigurationError, load_config
 from .environment import load_environment
-from .metrics import calculate_position_metrics
+from .metrics import calculate_position_metrics, calculate_temporal_metrics
 from .storage import (
     PositionFilters,
     ProjectionUnavailableError,
     read_filter_options,
     read_imports,
     read_position_orders,
-    read_position_metric_sample,
+    read_metric_sample,
     read_positions,
     read_strategy_keys,
 )
@@ -245,18 +245,31 @@ async def metrics_endpoint(
         strategy, symbol_family, direction, status, association, date_from, date_to
     )
     try:
-        pnl_values, excluded_open_positions = read_position_metric_sample(
-            DATABASE_PATH,
-            filters,
-        )
+        sample = read_metric_sample(DATABASE_PATH, filters)
     except ProjectionUnavailableError as exc:
         raise _projection_error(exc) from exc
     try:
-        return calculate_position_metrics(
-            pnl_values,
-            excluded_open_positions=excluded_open_positions,
+        payload = calculate_position_metrics(
+            sample.pnl_values,
+            excluded_open_positions=sample.excluded_open_positions,
             realized_available=status != "open",
         )
+        temporal = calculate_temporal_metrics(
+            sample.daily_pnl,
+            sample.opening_balances,
+            date_from=date_from,
+            date_to=date_to,
+            global_first_closed_date=sample.global_first_closed_date,
+            global_last_closed_date=sample.global_last_closed_date,
+            realized_available=status != "open",
+        )
+        temporal_reasons = cast(
+            dict[str, str], temporal.pop("temporal_unavailable_reasons")
+        )
+        payload.update(temporal)
+        position_reasons = cast(dict[str, str], payload["unavailable_reasons"])
+        position_reasons.update(temporal_reasons)
+        return payload
     except OverflowError as exc:
         raise _projection_error(
             ProjectionUnavailableError("numeric overflow in position metrics")

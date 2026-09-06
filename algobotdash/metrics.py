@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from datetime import date
 
 METRIC_NAMES = (
     "net_pnl",
@@ -26,6 +27,12 @@ RATIO_NAMES = (
     "expectancy",
     "sharpe_per_position",
     "sortino_per_position",
+)
+TEMPORAL_METRIC_NAMES = (
+    "sharpe_daily",
+    "sortino_daily",
+    "sharpe_annualized",
+    "sortino_annualized",
 )
 
 
@@ -177,3 +184,201 @@ def calculate_position_metrics(
         "sortino_per_position": sortino,
         "unavailable_reasons": quality_reasons | distribution_reasons,
     }
+
+
+def _business_days(date_from: date, date_to: date) -> int:
+    """Count weekdays in one inclusive interval without materializing it."""
+    total_days = (date_to - date_from).days + 1
+    full_weeks, remainder = divmod(total_days, 7)
+    weekdays = full_weeks * 5
+    return weekdays + sum(
+        (date_from.weekday() + offset) % 7 < 5 for offset in range(remainder)
+    )
+
+
+def _effective_period(
+    daily_pnl: Mapping[date, float],
+    *,
+    date_from: date | None,
+    date_to: date | None,
+    global_first_closed_date: date | None,
+    global_last_closed_date: date | None,
+) -> tuple[date, date] | None:
+    """Resolve explicit, filtered, and global interval bounds."""
+    selected_first = min(daily_pnl, default=None)
+    selected_last = max(daily_pnl, default=None)
+    if date_from is not None and date_to is not None:
+        effective = (date_from, date_to)
+    elif selected_first is not None and selected_last is not None:
+        effective = (date_from or selected_first, date_to or selected_last)
+    elif date_from is not None:
+        if global_last_closed_date is None:
+            return None
+        effective = (date_from, global_last_closed_date)
+    elif date_to is not None:
+        if global_first_closed_date is None:
+            return None
+        effective = (global_first_closed_date, date_to)
+    else:
+        return None
+    if effective[0] > effective[1]:
+        return None
+    return effective
+
+
+# Four related metric results keep this calculation cohesive.
+# pylint: disable=too-many-locals
+def _temporal_ratio_values(
+    returns: Sequence[float], observation_days: int
+) -> tuple[dict[str, float | None], dict[str, str]]:
+    """Calculate daily and annualized ratios with zero-filled weekdays."""
+    values: dict[str, float | None] = dict.fromkeys(TEMPORAL_METRIC_NAMES)
+    reasons: dict[str, str] = {}
+    if observation_days < 2:
+        reasons["sharpe_daily"] = "insufficient_daily_sample"
+        reasons["sortino_daily"] = "insufficient_daily_sample"
+        daily_sharpe = None
+        daily_sortino = None
+    else:
+        total = math.fsum(returns)
+        mean = total / observation_days
+        zero_days = observation_days - len(returns)
+        deviation_norm = math.hypot(
+            math.hypot(*(value - mean for value in returns)),
+            abs(mean) * math.sqrt(zero_days),
+        )
+        deviation = deviation_norm / math.sqrt(observation_days - 1)
+        downside = math.hypot(*(min(value, 0.0) for value in returns)) / math.sqrt(
+            observation_days
+        )
+        daily_sharpe = (
+            _finite_ratio(mean, deviation) if math.isfinite(deviation) else None
+        )
+        daily_sortino = (
+            _finite_ratio(mean, downside) if math.isfinite(downside) else None
+        )
+        if deviation == 0:
+            reasons["sharpe_daily"] = "zero_standard_deviation"
+        elif not math.isfinite(deviation) or daily_sharpe is None:
+            reasons["sharpe_daily"] = "numeric_overflow"
+        if downside == 0:
+            reasons["sortino_daily"] = "zero_downside_deviation"
+        elif not math.isfinite(downside) or daily_sortino is None:
+            reasons["sortino_daily"] = "numeric_overflow"
+    values["sharpe_daily"] = daily_sharpe
+    values["sortino_daily"] = daily_sortino
+    for name, daily_value in (
+        ("sharpe_annualized", daily_sharpe),
+        ("sortino_annualized", daily_sortino),
+    ):
+        daily_name = name.removesuffix("_annualized") + "_daily"
+        if observation_days < 30:
+            reasons[name] = "insufficient_annualized_sample"
+        elif daily_value is None:
+            reasons[name] = reasons[daily_name]
+        else:
+            values[name] = _finite_ratio(daily_value * math.sqrt(252), 1.0)
+            if values[name] is None:
+                reasons[name] = "numeric_overflow"
+    return values, reasons
+# pylint: enable=too-many-locals
+
+
+# The public calculation seam receives each independently testable input.
+# pylint: disable=too-many-arguments,too-many-locals
+def calculate_temporal_metrics(
+    daily_pnl: Mapping[date, float],
+    opening_balances: Mapping[date, float | None],
+    *,
+    date_from: date | None,
+    date_to: date | None,
+    global_first_closed_date: date | None,
+    global_last_closed_date: date | None,
+    realized_available: bool = True,
+) -> dict[str, object]:
+    """Return audited daily and annualized ratios for one filtered sample."""
+    period = _effective_period(
+        daily_pnl,
+        date_from=date_from,
+        date_to=date_to,
+        global_first_closed_date=global_first_closed_date,
+        global_last_closed_date=global_last_closed_date,
+    )
+    effective_from: date | None = None
+    effective_to: date | None = None
+    required_dates: list[date] = []
+    observation_days = 0
+    if period is not None:
+        effective_from, effective_to = period
+        observation_days = _business_days(effective_from, effective_to)
+        required_dates = sorted(
+            day
+            for day in daily_pnl
+            if day.weekday() < 5 and effective_from <= day <= effective_to
+        )
+    missing_dates = [
+        day
+        for day in required_dates
+        if day not in opening_balances or opening_balances[day] is None
+    ]
+    non_positive_dates: list[date] = []
+    for day in required_dates:
+        if day not in opening_balances:
+            continue
+        balance = opening_balances[day]
+        if balance is not None and balance <= 0:
+            non_positive_dates.append(day)
+    covered_days = len(required_dates) - len(missing_dates) - len(non_positive_dates)
+    payload: dict[str, object] = {
+        "effective_date_from": effective_from.isoformat() if effective_from else None,
+        "effective_date_to": effective_to.isoformat() if effective_to else None,
+        "daily_observation_days": observation_days,
+        "opening_balance_required_days": len(required_dates),
+        "opening_balance_covered_days": covered_days,
+        "opening_balance_missing_days": len(missing_dates),
+        "opening_balance_missing_dates": [day.isoformat() for day in missing_dates],
+        "opening_balance_non_positive_days": len(non_positive_dates),
+        "opening_balance_non_positive_dates": [
+            day.isoformat() for day in non_positive_dates
+        ],
+    }
+    if not realized_available:
+        payload.update(dict.fromkeys(TEMPORAL_METRIC_NAMES))
+        payload["temporal_unavailable_reasons"] = dict.fromkeys(
+            TEMPORAL_METRIC_NAMES,
+            "realized_metrics_unavailable_for_open_status",
+        )
+        return payload
+    if period is None:
+        payload.update(dict.fromkeys(TEMPORAL_METRIC_NAMES))
+        payload["temporal_unavailable_reasons"] = dict.fromkeys(
+            TEMPORAL_METRIC_NAMES, "empty_sample"
+        )
+        return payload
+    if missing_dates or non_positive_dates:
+        payload.update(dict.fromkeys(TEMPORAL_METRIC_NAMES))
+        payload["temporal_unavailable_reasons"] = dict.fromkeys(
+            TEMPORAL_METRIC_NAMES, "invalid_opening_balance_coverage"
+        )
+        return payload
+    returns: list[float] = []
+    for day in required_dates:
+        opening_balance = opening_balances[day]
+        if opening_balance is None:  # Covered by the validation branch above.
+            raise AssertionError("saldo coberto sem valor")
+        returns.append(daily_pnl[day] / opening_balance)
+    values: dict[str, float | None]
+    reasons: dict[str, str]
+    if not all(math.isfinite(value) for value in returns):
+        values = dict.fromkeys(TEMPORAL_METRIC_NAMES)
+        reasons = dict.fromkeys(TEMPORAL_METRIC_NAMES, "numeric_overflow")
+    else:
+        try:
+            values, reasons = _temporal_ratio_values(returns, observation_days)
+        except (OverflowError, ValueError):
+            values = dict.fromkeys(TEMPORAL_METRIC_NAMES)
+            reasons = dict.fromkeys(TEMPORAL_METRIC_NAMES, "numeric_overflow")
+    payload.update(values)
+    payload["temporal_unavailable_reasons"] = reasons
+    return payload
+# pylint: enable=too-many-arguments,too-many-locals

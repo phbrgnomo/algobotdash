@@ -101,6 +101,13 @@ class WebTests(unittest.TestCase):
         self.assertIn('id="metric-losing-trades"', content)
         self.assertIn('id="metric-net-pnl"', content)
         self.assertIn('id="metric-sortino-per-position"', content)
+        self.assertIn('id="daily-metrics-title"', content)
+        self.assertIn('id="metric-sharpe-daily"', content)
+        self.assertIn('id="metric-sortino-daily"', content)
+        self.assertIn('id="annualized-metrics-title"', content)
+        self.assertIn('id="metric-sharpe-annualized"', content)
+        self.assertIn('id="metric-sortino-annualized"', content)
+        self.assertIn('id="temporal-metrics-summary"', content)
         self.assertIn("Projeção indisponível.", content)
 
     @unittest.skipUnless(NODE_EXECUTABLE, "requires Node.js for JavaScript execution")
@@ -121,11 +128,14 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
   "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
   "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
-  "filter-association", "date-from", "date-to", "metrics-summary", "metrics-state",
+  "filter-association", "date-from", "date-to", "metrics-summary", "temporal-metrics-summary", "metrics-state",
   "metric-sample-size", "metric-winning-trades", "metric-losing-trades",
   "metric-net-pnl", "metric-gross-profit", "metric-gross-loss", "metric-win-rate",
   "metric-profit-factor", "metric-payoff", "metric-expectancy",
-  "metric-sharpe-per-position", "metric-sortino-per-position"];
+  "metric-sharpe-per-position", "metric-sortino-per-position", "metric-sharpe-daily",
+  "metric-sortino-daily", "metric-sharpe-annualized", "metric-sortino-annualized",
+  "reason-sharpe-daily", "reason-sortino-daily", "reason-sharpe-annualized",
+  "reason-sortino-annualized"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -144,6 +154,11 @@ const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
   gross_profit: 20, gross_loss: -10, winning_trades: 1, losing_trades: 1,
   win_rate: 0.5, profit_factor: 2, payoff: 2,
   expectancy: 5, sharpe_per_position: 0.5, sortino_per_position: 0.5,
+  effective_date_from: "2026-08-01", effective_date_to: "2026-08-02",
+  daily_observation_days: 2, opening_balance_required_days: 2,
+  opening_balance_covered_days: 2, opening_balance_missing_dates: [],
+  opening_balance_non_positive_dates: [], sharpe_daily: 0.4, sortino_daily: 0.3,
+  sharpe_annualized: null, sortino_annualized: null,
   unavailable_reasons: {}};
 const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: null,
   gross_profit: null, gross_loss: null, winning_trades: null, losing_trades: null,
@@ -276,11 +291,14 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
   "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
   "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
-  "filter-association", "date-from", "date-to", "metrics-summary", "metrics-state",
+  "filter-association", "date-from", "date-to", "metrics-summary", "temporal-metrics-summary", "metrics-state",
   "metric-sample-size", "metric-winning-trades", "metric-losing-trades",
   "metric-net-pnl", "metric-gross-profit", "metric-gross-loss", "metric-win-rate",
   "metric-profit-factor", "metric-payoff", "metric-expectancy",
-  "metric-sharpe-per-position", "metric-sortino-per-position"];
+  "metric-sharpe-per-position", "metric-sortino-per-position", "metric-sharpe-daily",
+  "metric-sortino-daily", "metric-sharpe-annualized", "metric-sortino-annualized",
+  "reason-sharpe-daily", "reason-sortino-daily", "reason-sharpe-annualized",
+  "reason-sortino-annualized"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -303,6 +321,11 @@ const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
   gross_profit: 20, gross_loss: -10, winning_trades: 1, losing_trades: 1,
   win_rate: 0.5, profit_factor: 2, payoff: 2,
   expectancy: 5, sharpe_per_position: 0.5, sortino_per_position: 0.5,
+  effective_date_from: "2026-08-01", effective_date_to: "2026-08-02",
+  daily_observation_days: 2, opening_balance_required_days: 2,
+  opening_balance_covered_days: 2, opening_balance_missing_dates: [],
+  opening_balance_non_positive_dates: [], sharpe_daily: 0.4, sortino_daily: 0.3,
+  sharpe_annualized: null, sortino_annualized: null,
   unavailable_reasons: {}};
 const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: null,
   gross_profit: null, gross_loss: null, winning_trades: null, losing_trades: null,
@@ -450,6 +473,29 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   if (elements["#metric-net-pnl"].textContent !== "10,00") throw new Error("available metric was cleared");
   for (const message of ["posições perdedoras", "pelo menos duas", "dispersão negativa"]) {
     if (!elements["#metrics-state"].textContent.includes(message)) throw new Error(`missing reason: ${message}`);
+  }
+  const legacyPayload = {...metricPayload};
+  delete legacyPayload.daily_observation_days;
+  context.renderMetrics(legacyPayload);
+  if (!elements["#temporal-metrics-summary"].textContent.includes("não fornecidas")) {
+    throw new Error("legacy backend was presented as real zero coverage");
+  }
+  context.renderMetrics({...metricPayload, sharpe_daily: null, sortino_daily: null,
+    sharpe_annualized: null, sortino_annualized: null,
+    opening_balance_required_days: 2, opening_balance_covered_days: 1,
+    opening_balance_missing_dates: ["2026-08-02"], opening_balance_non_positive_dates: [],
+    unavailable_reasons: {sharpe_daily: "invalid_opening_balance_coverage",
+      sortino_daily: "invalid_opening_balance_coverage",
+      sharpe_annualized: "invalid_opening_balance_coverage",
+      sortino_annualized: "invalid_opening_balance_coverage"}});
+  if (elements["#metric-sharpe-daily"].title !== "A cobertura do saldo de abertura ajustado é inválida.") {
+    throw new Error("daily coverage reason is not visible");
+  }
+  if (elements["#reason-sharpe-daily"].textContent !== "A cobertura do saldo de abertura ajustado é inválida.") {
+    throw new Error("daily coverage reason is not associated with its card");
+  }
+  if (!elements["#temporal-metrics-summary"].textContent.includes("2026-08-02")) {
+    throw new Error("missing balance date is not visible");
   }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """

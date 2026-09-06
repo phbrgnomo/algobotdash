@@ -69,6 +69,18 @@ class PositionFilters:
 
 
 @dataclass(frozen=True)
+class MetricSample:
+    """Position outcomes and account-ledger inputs for metric calculation."""
+
+    pnl_values: tuple[float, ...]
+    excluded_open_positions: int
+    daily_pnl: dict[date, float]
+    opening_balances: dict[date, float | None]
+    global_first_closed_date: date | None
+    global_last_closed_date: date | None
+
+
+@dataclass(frozen=True)
 class ProjectionData:
     """Parsed records and counters required to build a projection."""
 
@@ -394,10 +406,63 @@ def read_filter_options(path: Path) -> dict[str, list[str]]:
         connection.close()
 
 
-def read_position_metric_sample(
-    path: Path, filters: PositionFilters
-) -> tuple[list[float], int]:
-    """Return realized P&L values and open positions excluded by the filters."""
+def _finite_number(value: object, field: str) -> float:
+    """Read one finite projected number or reject the projection."""
+    if not isinstance(value, (int, float, str)):
+        raise ValueError(f"{field} inválido")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field} inválido") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{field} não finito")
+    return number
+
+
+def _transaction_id_key(value: object) -> tuple[int, int, str]:
+    """Sort MT5 numeric identifiers first while remaining deterministic."""
+    identifier = str(value)
+    try:
+        return (0, int(identifier), identifier)
+    except ValueError:
+        return (1, 0, identifier)
+
+
+def _opening_balances(rows: Iterable[sqlite3.Row]) -> dict[date, float | None]:
+    """Reconstruct each adjusted opening balance from the global account ledger."""
+    by_day: dict[date, list[tuple[datetime, tuple[int, int, str], sqlite3.Row]]] = {}
+    for row in rows:
+        timestamp = datetime.fromisoformat(_utc_timestamp(row["at"]) or "")
+        local_day = timestamp.astimezone(REPORT_TZ).date()
+        by_day.setdefault(local_day, []).append(
+            (timestamp, _transaction_id_key(row["transaction_id"]), row)
+        )
+
+    balances: dict[date, float | None] = {}
+    for local_day, transactions in by_day.items():
+        transactions.sort(key=lambda item: (item[0], item[1]))
+        prior_results: list[float] = []
+        for _, _, row in transactions:
+            if row["comment"] == "Ajuste de Saldo":
+                balance = row["balance"]
+                balances[local_day] = None if balance is None else _finite_number(
+                    _finite_number(balance, "saldo") - math.fsum(prior_results),
+                    "saldo de abertura ajustado",
+                )
+                break
+            prior_results.append(
+                math.fsum(
+                    _finite_number(row[field], field)
+                    for field in ("pnl", "commission", "tax", "swap")
+                )
+            )
+    return balances
+
+
+# Reading the related inputs in one connection preserves a consistent snapshot.
+# pylint: disable=too-many-locals
+def read_metric_sample(path: Path, filters: PositionFilters) -> MetricSample:
+    """Return filtered outcomes and global ledger inputs in one snapshot."""
     where_sql, parameters = _position_where(filters)
     connection = _open_projection(path)
     try:
@@ -405,26 +470,48 @@ def read_position_metric_sample(
             # The SQL fragment contains only fixed predicates from _position_where;
             # every filter value remains bound through ``parameters``.
             query = (
-                "SELECT status, pnl FROM positions "
+                "SELECT status, pnl, exit_at FROM positions "
                 f"{where_sql}"  # nosec B608  # nosemgrep
             )
-            rows = connection.execute(
-                query,
-                parameters,
-            ).fetchall()
-            pnl_values = []
+            rows = connection.execute(query, parameters).fetchall()
+            pnl_values: list[float] = []
+            pnl_by_day: dict[date, list[float]] = {}
             for row in rows:
                 if row["status"] == "closed":
-                    pnl = float(row["pnl"])
-                    if not math.isfinite(pnl):
-                        raise ValueError("P&L não finito")
+                    pnl = _finite_number(row["pnl"], "P&L")
                     pnl_values.append(pnl)
+                    closed_day = date.fromisoformat(_bahia_date(row["exit_at"]) or "")
+                    pnl_by_day.setdefault(closed_day, []).append(pnl)
             excluded_open_positions = sum(row["status"] == "open" for row in rows)
+            global_closed_days = [
+                date.fromisoformat(_bahia_date(row[0]) or "")
+                for row in connection.execute(
+                    "SELECT exit_at FROM positions WHERE status = 'closed'"
+                )
+            ]
+            transaction_rows = connection.execute(
+                "SELECT transaction_id, at, commission, tax, swap, pnl, balance, comment "
+                "FROM transactions"
+            ).fetchall()
+            daily_pnl = {
+                day: math.fsum(values) for day, values in pnl_by_day.items()
+            }
+            if not all(math.isfinite(value) for value in daily_pnl.values()):
+                raise ValueError("P&L diário não finito")
+            opening_balances = _opening_balances(transaction_rows)
         except (sqlite3.Error, TypeError, ValueError, OverflowError) as exc:
             raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
-        return pnl_values, excluded_open_positions
+        return MetricSample(
+            tuple(pnl_values),
+            excluded_open_positions,
+            daily_pnl,
+            opening_balances,
+            min(global_closed_days, default=None),
+            max(global_closed_days, default=None),
+        )
     finally:
         connection.close()
+# pylint: enable=too-many-locals
 
 
 def read_strategy_keys(path: Path) -> list[ProjectionRow]:
