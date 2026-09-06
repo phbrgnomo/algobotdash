@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 
 METRIC_NAMES = (
@@ -299,8 +300,109 @@ def _unavailable_temporal_payload(
     )
 
 
+@dataclass(frozen=True)
+class _TemporalCoverage:
+    """Effective period and opening-balance coverage for a filtered sample."""
+
+    period: tuple[date, date] | None
+    observation_days: int
+    required_dates: tuple[date, ...]
+    missing_dates: tuple[date, ...]
+    non_positive_dates: tuple[date, ...]
+
+
+def _temporal_coverage(
+    daily_pnl: Mapping[date, float],
+    opening_balances: Mapping[date, float | None],
+    period: tuple[date, date] | None,
+) -> _TemporalCoverage:
+    """Measure required opening balances inside the effective period."""
+    if period is None:
+        return _TemporalCoverage(None, 0, (), (), ())
+    effective_from, effective_to = period
+    required_dates = tuple(
+        sorted(
+            day
+            for day in daily_pnl
+            if day.weekday() < 5 and effective_from <= day <= effective_to
+        )
+    )
+    missing_dates = tuple(
+        day
+        for day in required_dates
+        if day not in opening_balances or opening_balances[day] is None
+    )
+    non_positive_dates = tuple(
+        day
+        for day in required_dates
+        if (opening_balance := opening_balances.get(day)) is not None
+        and opening_balance <= 0
+    )
+    return _TemporalCoverage(
+        period,
+        _business_days(effective_from, effective_to),
+        required_dates,
+        missing_dates,
+        non_positive_dates,
+    )
+
+
+def _temporal_coverage_payload(coverage: _TemporalCoverage) -> dict[str, object]:
+    """Serialize effective-period and opening-balance audit fields."""
+    effective_from, effective_to = coverage.period or (None, None)
+    invalid_days = len(coverage.missing_dates) + len(coverage.non_positive_dates)
+    return {
+        "effective_date_from": effective_from.isoformat() if effective_from else None,
+        "effective_date_to": effective_to.isoformat() if effective_to else None,
+        "daily_observation_days": coverage.observation_days,
+        "opening_balance_required_days": len(coverage.required_dates),
+        "opening_balance_covered_days": len(coverage.required_dates) - invalid_days,
+        "opening_balance_missing_days": len(coverage.missing_dates),
+        "opening_balance_missing_dates": [
+            day.isoformat() for day in coverage.missing_dates
+        ],
+        "opening_balance_non_positive_days": len(coverage.non_positive_dates),
+        "opening_balance_non_positive_dates": [
+            day.isoformat() for day in coverage.non_positive_dates
+        ],
+    }
+
+
+def _daily_returns(
+    daily_pnl: Mapping[date, float],
+    opening_balances: Mapping[date, float | None],
+    required_dates: Sequence[date],
+) -> list[float]:
+    """Calculate returns after coverage has been validated."""
+    returns: list[float] = []
+    for day in required_dates:
+        opening_balance = opening_balances[day]
+        if opening_balance is None:
+            raise AssertionError("saldo coberto sem valor")
+        returns.append(daily_pnl[day] / opening_balance)
+    return returns
+
+
+def _safe_temporal_ratio_values(
+    returns: Sequence[float], observation_days: int
+) -> tuple[dict[str, float | None], dict[str, str]]:
+    """Convert numeric failures into the stable public unavailability reason."""
+    if not all(math.isfinite(value) for value in returns):
+        return (
+            dict.fromkeys(TEMPORAL_METRIC_NAMES),
+            dict.fromkeys(TEMPORAL_METRIC_NAMES, "numeric_overflow"),
+        )
+    try:
+        return _temporal_ratio_values(returns, observation_days)
+    except (OverflowError, ValueError):
+        return (
+            dict.fromkeys(TEMPORAL_METRIC_NAMES),
+            dict.fromkeys(TEMPORAL_METRIC_NAMES, "numeric_overflow"),
+        )
+
+
 # The public calculation seam receives each independently testable input.
-# pylint: disable=too-many-arguments,too-many-locals
+# pylint: disable=too-many-arguments
 def calculate_temporal_metrics(
     daily_pnl: Mapping[date, float],
     opening_balances: Mapping[date, float | None],
@@ -319,72 +421,21 @@ def calculate_temporal_metrics(
         global_first_closed_date=global_first_closed_date,
         global_last_closed_date=global_last_closed_date,
     )
-    effective_from: date | None = None
-    effective_to: date | None = None
-    required_dates: list[date] = []
-    observation_days = 0
-    if period is not None:
-        effective_from, effective_to = period
-        observation_days = _business_days(effective_from, effective_to)
-        required_dates = sorted(
-            day
-            for day in daily_pnl
-            if day.weekday() < 5 and effective_from <= day <= effective_to
-        )
-    missing_dates = [
-        day
-        for day in required_dates
-        if day not in opening_balances or opening_balances[day] is None
-    ]
-    non_positive_dates: list[date] = []
-    for day in required_dates:
-        if day not in opening_balances:
-            continue
-        balance = opening_balances[day]
-        if balance is not None and balance <= 0:
-            non_positive_dates.append(day)
-    covered_days = len(required_dates) - len(missing_dates) - len(non_positive_dates)
-    payload: dict[str, object] = {
-        "effective_date_from": effective_from.isoformat() if effective_from else None,
-        "effective_date_to": effective_to.isoformat() if effective_to else None,
-        "daily_observation_days": observation_days,
-        "opening_balance_required_days": len(required_dates),
-        "opening_balance_covered_days": covered_days,
-        "opening_balance_missing_days": len(missing_dates),
-        "opening_balance_missing_dates": [day.isoformat() for day in missing_dates],
-        "opening_balance_non_positive_days": len(non_positive_dates),
-        "opening_balance_non_positive_dates": [
-            day.isoformat() for day in non_positive_dates
-        ],
-    }
+    coverage = _temporal_coverage(daily_pnl, opening_balances, period)
+    payload = _temporal_coverage_payload(coverage)
     if not realized_available:
         return _unavailable_temporal_payload(
             payload, "realized_metrics_unavailable_for_open_status"
         )
     if period is None:
         return _unavailable_temporal_payload(payload, "empty_sample")
-    if missing_dates or non_positive_dates:
+    if coverage.missing_dates or coverage.non_positive_dates:
         return _unavailable_temporal_payload(
             payload, "invalid_opening_balance_coverage"
         )
-    returns: list[float] = []
-    for day in required_dates:
-        opening_balance = opening_balances[day]
-        if opening_balance is None:  # Covered by the validation branch above.
-            raise AssertionError("saldo coberto sem valor")
-        returns.append(daily_pnl[day] / opening_balance)
-    values: dict[str, float | None]
-    reasons: dict[str, str]
-    if not all(math.isfinite(value) for value in returns):
-        values = dict.fromkeys(TEMPORAL_METRIC_NAMES)
-        reasons = dict.fromkeys(TEMPORAL_METRIC_NAMES, "numeric_overflow")
-    else:
-        try:
-            values, reasons = _temporal_ratio_values(returns, observation_days)
-        except (OverflowError, ValueError):
-            values = dict.fromkeys(TEMPORAL_METRIC_NAMES)
-            reasons = dict.fromkeys(TEMPORAL_METRIC_NAMES, "numeric_overflow")
+    returns = _daily_returns(daily_pnl, opening_balances, coverage.required_dates)
+    values, reasons = _safe_temporal_ratio_values(returns, coverage.observation_days)
     payload.update(values)
     payload["temporal_unavailable_reasons"] = reasons
     return payload
-# pylint: enable=too-many-arguments,too-many-locals
+# pylint: enable=too-many-arguments
