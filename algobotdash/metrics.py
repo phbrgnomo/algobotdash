@@ -222,9 +222,7 @@ def _effective_period(
         effective = (global_first_closed_date, date_to)
     else:
         return None
-    if effective[0] > effective[1]:
-        return None
-    return effective
+    return None if effective[0] > effective[1] else effective
 
 
 # Four related metric results keep this calculation cohesive.
@@ -435,7 +433,7 @@ def calculate_temporal_metrics(
         )
     returns = _daily_returns(daily_pnl, opening_balances, coverage.required_dates)
     values, reasons = _safe_temporal_ratio_values(returns, coverage.observation_days)
-    payload.update(values)
+    payload |= values
     payload["temporal_unavailable_reasons"] = reasons
     return payload
 # pylint: enable=too-many-arguments

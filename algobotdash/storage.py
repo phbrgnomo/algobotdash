@@ -214,6 +214,17 @@ def read_import_history(path: Path) -> list[ImportHistoryRow]:
         connection.close()
 
 
+def _configure_projection_connection(connection: sqlite3.Connection) -> None:
+    """Configure SQLite row access and deterministic timestamp functions."""
+    connection.row_factory = sqlite3.Row
+    connection.create_function(
+        "utc_timestamp", 1, _utc_timestamp, deterministic=True
+    )
+    connection.create_function(
+        "bahia_date", 1, _bahia_date, deterministic=True
+    )
+
+
 def _open_projection(path: Path) -> sqlite3.Connection:
     """Open a compatible projection in read-only mode or raise a stable error."""
     if not path.is_file():
@@ -221,13 +232,7 @@ def _open_projection(path: Path) -> sqlite3.Connection:
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-        connection.row_factory = sqlite3.Row
-        connection.create_function(
-            "utc_timestamp", 1, _utc_timestamp, deterministic=True
-        )
-        connection.create_function(
-            "bahia_date", 1, _bahia_date, deterministic=True
-        )
+        _configure_projection_connection(connection)
         _validate_projection(connection)
         return connection
     except (OSError, sqlite3.Error, ValueError) as exc:
@@ -330,7 +335,7 @@ def read_positions(
     active_filters = filters or PositionFilters()
     where_sql, parameters = _position_where(active_filters)
     query = (  # Fixed predicates and allowlisted ordering; values stay parameterized.
-        "SELECT position_id, strategy, symbol_family, "  # noqa: S608  # nosec B608
+        "SELECT position_id, strategy, symbol_family, " # nosec B608
         "CASE WHEN strategy IS NOT NULL AND symbol_family IS NOT NULL "
         "THEN symbol_family || ' ' || strategy END AS strategy_key, "
         "CASE WHEN is_associated = 1 THEN 'associated' ELSE 'unassociated' "
@@ -346,7 +351,7 @@ def read_positions(
         rows, total = _page_rows(
             connection,
             query,
-            f"SELECT COUNT(*) FROM positions {where_sql}",  # noqa: S608  # nosec B608
+            f"SELECT COUNT(*) FROM positions {where_sql}", # nosec B608
             limit,
             offset,
             parameters,
@@ -416,7 +421,7 @@ def read_filter_options(path: Path) -> dict[str, list[str]]:
 def _finite_number(value: object, field: str) -> float:
     """Read one finite projected number or reject the projection."""
     if not isinstance(value, (int, float, str)):
-        raise ValueError(f"{field} inválido")
+        raise TypeError(f"{field} inválido")
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError) as exc:
