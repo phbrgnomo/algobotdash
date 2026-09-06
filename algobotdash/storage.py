@@ -169,40 +169,47 @@ CREATE TABLE rejected_rows (
 """
 
 
+def _read_validated_import_history(
+    connection: sqlite3.Connection, path: Path
+) -> list[ImportHistoryRow]:
+    """Validate the imports table and return its chronological history."""
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    if "imports" not in tables:
+        raise ValueError(f"schema SQLite incompatível: tabela imports ausente em {path}")
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(imports)")}
+    required = REQUIRED_TABLE_COLUMNS["imports"]
+    if missing_columns := required - columns:
+        raise ValueError(
+            f"schema SQLite incompatível em {path}: colunas ausentes em imports: "
+            f"{sorted(missing_columns)}"
+        )
+    history = connection.execute(
+        "SELECT id, source_name, source_hash, imported_at, rows_read, "
+        "positions_created, no_comment_count, rejected_count "
+        "FROM imports ORDER BY id"
+    ).fetchall()
+    for row in history:
+        try:
+            _ = _utc_timestamp(row[3])
+        except ProjectionUnavailableError as exc:
+            raise ValueError(
+                f"schema SQLite incompatível em {path}: imported_at inválido"
+            ) from exc
+    return history
+
+
 def read_import_history(path: Path) -> list[ImportHistoryRow]:
     """Read and validate the import history from an existing database."""
     if not path.exists():
         return []
     connection = sqlite3.connect(path)
     try:
-        tables = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
-        if "imports" not in tables:
-            raise ValueError(f"schema SQLite incompatível: tabela imports ausente em {path}")
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(imports)")}
-        required = REQUIRED_TABLE_COLUMNS["imports"]
-        if missing_columns := required - columns:
-            raise ValueError(
-                f"schema SQLite incompatível em {path}: colunas ausentes em imports: "
-                f"{sorted(missing_columns)}"
-            )
-        history = connection.execute(
-            "SELECT id, source_name, source_hash, imported_at, rows_read, "
-            "positions_created, no_comment_count, rejected_count "
-            "FROM imports ORDER BY id"
-        ).fetchall()
-        for row in history:
-            try:
-                _ = _utc_timestamp(row[3])
-            except ProjectionUnavailableError as exc:
-                raise ValueError(
-                    f"schema SQLite incompatível em {path}: imported_at inválido"
-                ) from exc
-        return history
+        return _read_validated_import_history(connection, path)
     finally:
         connection.close()
 
