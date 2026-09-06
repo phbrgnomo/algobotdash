@@ -13,12 +13,14 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import ConfigurationError, load_config
 from .environment import load_environment
+from .metrics import calculate_position_metrics
 from .storage import (
     PositionFilters,
     ProjectionUnavailableError,
     read_filter_options,
     read_imports,
     read_position_orders,
+    read_position_metric_sample,
     read_positions,
     read_strategy_keys,
 )
@@ -100,11 +102,40 @@ def _optional_dimension(value: str | None, name: str) -> str | None:
         return None
     if normalized := value.strip():
         return normalized
-    else:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "invalid_filter", "field": name},
-        )
+    raise HTTPException(
+        status_code=422,
+        detail={"code": "invalid_filter", "field": name},
+    )
+
+
+# The shared public contract has one argument per filter dimension.
+# pylint: disable=too-many-arguments,too-many-positional-arguments
+def _position_filters(
+    strategy: str | None,
+    symbol_family: str | None,
+    direction: str | None,
+    status: str,
+    association: str,
+    date_from: date | None,
+    date_to: date | None,
+) -> PositionFilters:
+    """Normalize and validate filters shared by position-based endpoints."""
+    normalized_strategy = _optional_dimension(strategy, "strategy")
+    normalized_symbol_family = _optional_dimension(symbol_family, "symbol_family")
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(status_code=422, detail={"code": "invalid_date_range"})
+    if normalized_strategy is not None and association == "unassociated":
+        raise HTTPException(status_code=422, detail={"code": "contradictory_filters"})
+    return PositionFilters(
+        strategy=normalized_strategy,
+        symbol_family=normalized_symbol_family,
+        direction=direction,
+        status=status,
+        association=association,
+        date_from=date_from,
+        date_to=date_to,
+    )
+# pylint: enable=too-many-arguments,too-many-positional-arguments
 
 
 def _status_state() -> dict[str, Any]:
@@ -179,18 +210,9 @@ async def positions_endpoint(
     date_to: date | None = None,
 ) -> dict[str, Any]:
     """Return a filtered page of analytical positions."""
-    normalized_strategy = _optional_dimension(strategy, "strategy")
-    normalized_symbol_family = _optional_dimension(symbol_family, "symbol_family")
-    if date_from is not None and date_to is not None and date_from > date_to:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "invalid_date_range"},
-        )
-    if normalized_strategy is not None and association == "unassociated":
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "contradictory_filters"},
-        )
+    filters = _position_filters(
+        strategy, symbol_family, direction, status, association, date_from, date_to
+    )
     try:
         items, total = read_positions(
             DATABASE_PATH,
@@ -198,19 +220,47 @@ async def positions_endpoint(
             offset=offset,
             sort_by=sort_by,
             sort_order=sort_order,
-            filters=PositionFilters(
-                strategy=normalized_strategy,
-                symbol_family=normalized_symbol_family,
-                direction=direction,
-                status=status,
-                association=association,
-                date_from=date_from,
-                date_to=date_to,
-            ),
+            filters=filters,
         )
     except ProjectionUnavailableError as exc:
         raise _projection_error(exc) from exc
     return {"items": items, "total": total, "limit": limit, "offset": offset}
+# pylint: enable=too-many-arguments,too-many-positional-arguments,too-many-locals
+
+
+# FastAPI exposes each query parameter through the endpoint signature.
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+@app.get("/api/metrics")
+async def metrics_endpoint(
+    strategy: str | None = None,
+    symbol_family: str | None = None,
+    direction: Literal["buy", "sell"] | None = None,
+    status: Literal["closed", "open", "all"] = "closed",
+    association: Literal["associated", "unassociated", "all"] = "all",
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> dict[str, Any]:
+    """Return metrics for the filtered analytical-position sample."""
+    filters = _position_filters(
+        strategy, symbol_family, direction, status, association, date_from, date_to
+    )
+    try:
+        pnl_values, excluded_open_positions = read_position_metric_sample(
+            DATABASE_PATH,
+            filters,
+        )
+    except ProjectionUnavailableError as exc:
+        raise _projection_error(exc) from exc
+    try:
+        return calculate_position_metrics(
+            pnl_values,
+            excluded_open_positions=excluded_open_positions,
+            realized_available=status != "open",
+        )
+    except OverflowError as exc:
+        raise _projection_error(
+            ProjectionUnavailableError("numeric overflow in position metrics")
+        ) from exc
 # pylint: enable=too-many-arguments,too-many-positional-arguments,too-many-locals
 
 
