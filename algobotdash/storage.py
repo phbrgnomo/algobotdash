@@ -402,8 +402,14 @@ def read_position_metric_sample(
     connection = _open_projection(path)
     try:
         try:
+            # The SQL fragment contains only fixed predicates from _position_where;
+            # every filter value remains bound through ``parameters``.
+            query = (
+                "SELECT status, pnl FROM positions "
+                f"{where_sql}"  # nosec B608  # nosemgrep
+            )
             rows = connection.execute(
-                f"SELECT status, pnl FROM positions {where_sql}",  # noqa: S608  # nosec B608
+                query,
                 parameters,
             ).fetchall()
             pnl_values = []

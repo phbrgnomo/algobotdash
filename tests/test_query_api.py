@@ -20,7 +20,7 @@ from tests.fixture_helpers import get_asgi, insert_positions
 
 
 # The integration seam intentionally covers every public read-only API behavior.
-# pylint: disable=too-many-public-methods
+# pylint: disable=too-many-lines,too-many-public-methods
 class QueryApiTests(unittest.TestCase):
     """Verify externally visible position and projection query behavior."""
 
@@ -423,6 +423,18 @@ class QueryApiTests(unittest.TestCase):
     def test_each_metrics_filter_is_independently_effective(self) -> None:
         """Make every shared metric predicate observable against control rows."""
         self._seed_projection()
+        with sqlite3.connect(self.database_path) as connection:
+            insert_positions(
+                connection,
+                [
+                    (
+                        "400", None, "BIT", "BITQ26", "buy",
+                        "2026-08-01T23:30:00-03:00",
+                        "2026-08-04T00:30:00-03:00", "closed",
+                        1, 1, 1, 2, 0, 0, 7, 1, 2,
+                    )
+                ],
+            )
 
         strategy = self._request("/api/metrics?status=all&strategy=Turtle").json()
         symbol = self._request("/api/metrics?status=all&symbol_family=WDO").json()
@@ -439,6 +451,9 @@ class QueryApiTests(unittest.TestCase):
         upper_bound = self._request(
             "/api/metrics?status=all&date_to=2026-08-01"
         ).json()
+        exit_period = self._request(
+            "/api/metrics?status=all&date_from=2026-08-04&date_to=2026-08-04"
+        ).json()
 
         self.assertEqual((strategy["sample_size"], strategy["net_pnl"]), (1, 9))
         self.assertEqual(
@@ -450,7 +465,7 @@ class QueryApiTests(unittest.TestCase):
         )
         self.assertEqual(
             (associated["sample_size"], associated["excluded_open_positions"]),
-            (2, 0),
+            (3, 0),
         )
         self.assertEqual(
             (unassociated["sample_size"], unassociated["excluded_open_positions"]),
@@ -467,6 +482,14 @@ class QueryApiTests(unittest.TestCase):
                 upper_bound["excluded_open_positions"],
             ),
             (1, 9, 0),
+        )
+        self.assertEqual(
+            (
+                exit_period["sample_size"],
+                exit_period["net_pnl"],
+                exit_period["excluded_open_positions"],
+            ),
+            (1, 7, 0),
         )
 
     def test_metrics_reject_additive_numeric_overflow(self) -> None:
