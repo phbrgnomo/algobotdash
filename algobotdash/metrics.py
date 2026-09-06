@@ -284,6 +284,21 @@ def _temporal_ratio_values(
 # pylint: enable=too-many-locals
 
 
+def _unavailable_temporal_payload(
+    payload: dict[str, object], reason: str
+) -> dict[str, object]:
+    """Add unavailable temporal metrics with one shared reason."""
+    return (
+        payload
+        | dict.fromkeys(TEMPORAL_METRIC_NAMES)
+        | {
+            "temporal_unavailable_reasons": dict.fromkeys(
+                TEMPORAL_METRIC_NAMES, reason
+            )
+        }
+    )
+
+
 # The public calculation seam receives each independently testable input.
 # pylint: disable=too-many-arguments,too-many-locals
 def calculate_temporal_metrics(
@@ -343,24 +358,15 @@ def calculate_temporal_metrics(
         ],
     }
     if not realized_available:
-        payload.update(dict.fromkeys(TEMPORAL_METRIC_NAMES))
-        payload["temporal_unavailable_reasons"] = dict.fromkeys(
-            TEMPORAL_METRIC_NAMES,
-            "realized_metrics_unavailable_for_open_status",
+        return _unavailable_temporal_payload(
+            payload, "realized_metrics_unavailable_for_open_status"
         )
-        return payload
     if period is None:
-        payload.update(dict.fromkeys(TEMPORAL_METRIC_NAMES))
-        payload["temporal_unavailable_reasons"] = dict.fromkeys(
-            TEMPORAL_METRIC_NAMES, "empty_sample"
-        )
-        return payload
+        return _unavailable_temporal_payload(payload, "empty_sample")
     if missing_dates or non_positive_dates:
-        payload.update(dict.fromkeys(TEMPORAL_METRIC_NAMES))
-        payload["temporal_unavailable_reasons"] = dict.fromkeys(
-            TEMPORAL_METRIC_NAMES, "invalid_opening_balance_coverage"
+        return _unavailable_temporal_payload(
+            payload, "invalid_opening_balance_coverage"
         )
-        return payload
     returns: list[float] = []
     for day in required_dates:
         opening_balance = opening_balances[day]
