@@ -117,6 +117,36 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(closed["monetary_drawdown"], all_positions["monetary_drawdown"])
         self.assertEqual(all_positions["excluded_open_positions"], 1)
 
+    def test_monetary_drawdown_numeric_overflow_is_isolated(self) -> None:
+        """Exact decimal depth can overflow while binary position totals stay finite."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "fixture.xlsx", "hash", "2026-08-03T12:00:00+00:00", 2, 2, 0, 0),
+            )
+            # The binary sum rounds to -sys.float_info.max, but the exact sum
+            # of these decimal representations exceeds the float overflow threshold.
+            insert_positions(connection, [
+                (str(index), "Turtle", "WIN", "WINQ26", "buy",
+                 f"2026-08-0{index}T10:00:00+00:00",
+                 f"2026-08-0{index}T12:00:00+00:00", "closed",
+                 1, 1, 100, 99, 0, 0, pnl, 1, 1)
+                for index, pnl in enumerate(
+                    (-1.797693134862315e308, -8.981281392906237e292), start=1
+                )
+            ])
+
+        response = self._request("/api/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["net_pnl"], -sys.float_info.max)
+        self.assertEqual(payload["monetary_drawdown"], {
+            "state": "unavailable", "deepest_episode": None, "longest_episode": None,
+        })
+        self.assertEqual(payload["unavailable_reasons"]["monetary_drawdown"],
+                         "numeric_overflow")
+
     def test_monetary_same_instant_decimal_losses_recover_exactly(self):
         """Aggregation preserves exact decimal recovery across later timestamps."""
         with self._projection() as connection:
