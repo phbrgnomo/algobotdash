@@ -56,6 +56,12 @@ Filtros com enum inválido, dimensão vazia, intervalo invertido ou a combinaç�
 
 `/api/metrics` aceita os mesmos filtros, sem paginação ou ordenação, e calcula métricas sobre posições realizadas. A resposta inclui `sample_size` (quantidade de operações), `winning_trades`, `losing_trades`, `excluded_open_positions`, P&L líquido, ganho bruto, perda bruta negativa, taxa de acerto, profit factor, payoff, expectância, Sharpe e Sortino por posição. Posições com P&L zero entram em `sample_size`, mas não em `winning_trades` nem `losing_trades`; também entram no denominador da taxa de acerto, mas não nas médias de ganhos ou perdas. Sharpe usa desvio-padrão amostral; Sortino usa downside deviation sobre todas as observações; ambos exigem pelo menos duas posições. Valores sem denominador válido ou cuja razão exceda a representação numérica retornam `null`, com um código em `unavailable_reasons`, e nunca infinito. Se um agregado monetário exceder essa representação, a API retorna HTTP 503 com `projection_unavailable`.
 
+A mesma resposta acrescenta `sharpe_daily`, `sortino_daily`, `sharpe_annualized` e `sortino_annualized`, além do período efetivo, quantidade de dias úteis e cobertura auditável do saldo de abertura ajustado. O retorno diário é o P&L das posições filtradas encerradas no dia dividido pelo saldo global de abertura ajustado; dias úteis sem encerramentos recebem retorno zero e fins de semana são excluídos. O ajuste é identificado pelo comentário exato `Ajuste de Saldo`. O primeiro ajuste do dia em `America/Bahia` define a referência; seu saldo é reduzido pelo P&L, comissão, taxa e swap de transações globais anteriores. Ajustes posteriores não redefinem o dia.
+
+`effective_date_from`, `effective_date_to` e `daily_observation_days` descrevem o intervalo calculado. `opening_balance_required_days` e `opening_balance_covered_days` resumem a cobertura; `opening_balance_missing_days`, `opening_balance_missing_dates`, `opening_balance_non_positive_days` e `opening_balance_non_positive_dates` quantificam e localizam falhas. Saldo positivo é obrigatório somente nos dias com posições filtradas encerradas. Uma falha retorna os quatro índices temporais como `null` com `invalid_opening_balance_coverage`, sem invalidar as métricas por posição. Índices diários exigem dois dias úteis; índices anualizados exigem 30 e multiplicam a razão diária por `sqrt(252)`.
+
+Se ajustes tiverem o mesmo instante, o menor identificador numérico da transação prevalece; identificadores não numéricos usam ordem textual determinística. Com dois limites de data, o período explícito é preservado. Limites ausentes são completados pelas saídas da amostra; para uma amostra vazia e unilateral, usa-se a primeira ou última saída global. Um intervalo efetivo invertido ou uma amostra vazia sem limites retorna datas nulas, zero dias e `empty_sample`.
+
 Com `status=all`, as métricas usam apenas as posições realizadas e `excluded_open_positions` informa quantas abertas foram excluídas. Com `status=open`, todas as métricas realizadas ficam indisponíveis. Essa regra prevalece sobre a amostra vazia: mesmo sem posições realizadas, os agregados, as contagens, as taxas e as razões retornam `null`, com o motivo `realized_metrics_unavailable_for_open_status`. Para os demais filtros, uma amostra realizada vazia mantém P&L líquido, ganho bruto, perda bruta e contagens em zero, mas retorna taxas e razões nulas. A API não arredonda valores; o dashboard mostra valores monetários sem símbolo e com duas casas, percentuais com duas casas, razões com três e contagens inteiras.
 
 Até a entrega do MVP, o SQLite usa um único schema corrente, sem tabela de versão ou migrações. O refresh reaproveita o histórico de importações entre projeções compatíveis. Se uma alteração estrutural tornar a tabela `imports` incompatível, apague o arquivo configurado em `ALGOBOTDASH_DATABASE` ou `--database` (`data/algobotdash.sqlite` por padrão) e execute novamente a importação; toda a projeção e seu histórico serão reconstruídos a partir do Excel.
@@ -146,8 +152,8 @@ O dashboard terá métricas de carteira e por estratégia, com filtros compartil
 - operações e P&L;
 - profit factor, taxa de acerto, payoff e expectativa;
 - profundidade, duração e recuperação de drawdown;
-- Sharpe e Sortino por trade;
-- versões diária e anualizada de Sharpe e Sortino;
+- Sharpe e Sortino por posição;
+- Sharpe e Sortino diário e anualizado;
 - curvas de capital por carteira e estratégia.
 
 Posições sem comentário ficam em um agregado separado. A reconstrução de ciclos de piramidação está fora do MVP.

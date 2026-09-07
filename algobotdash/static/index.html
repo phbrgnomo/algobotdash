@@ -21,6 +21,7 @@
       .metrics-grid { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 16px; }
       .metric-card { background: #24323b; border-radius: 6px; padding: 14px; }
       .metric-card strong { display: block; font-size: 22px; margin-top: 6px; }
+      .metric-reason { color: #ffb4ba; display: block; margin-top: 6px; }
       button, input, select { background: #24323b; border: 1px solid #50616c; border-radius: 4px; color: inherit; padding: 7px 10px; }
       button:disabled { cursor: not-allowed; opacity: .5; }
       .table-wrap { overflow-x: auto; }
@@ -110,6 +111,17 @@
             <div class="metric-card"><small>Sharpe por posição</small><strong id="metric-sharpe-per-position">—</strong></div>
             <div class="metric-card"><small>Sortino por posição</small><strong id="metric-sortino-per-position">—</strong></div>
           </div>
+          <h3 id="daily-metrics-title">Métricas diárias</h3>
+          <small id="temporal-metrics-summary">Consultando cobertura do saldo...</small>
+          <div class="metrics-grid">
+            <div class="metric-card"><small>Sharpe diário</small><strong id="metric-sharpe-daily" aria-describedby="reason-sharpe-daily">—</strong><small class="metric-reason" id="reason-sharpe-daily"></small></div>
+            <div class="metric-card"><small>Sortino diário</small><strong id="metric-sortino-daily" aria-describedby="reason-sortino-daily">—</strong><small class="metric-reason" id="reason-sortino-daily"></small></div>
+          </div>
+          <h3 id="annualized-metrics-title">Métricas anualizadas</h3>
+          <div class="metrics-grid">
+            <div class="metric-card"><small>Sharpe anualizado</small><strong id="metric-sharpe-annualized" aria-describedby="reason-sharpe-annualized">—</strong><small class="metric-reason" id="reason-sharpe-annualized"></small></div>
+            <div class="metric-card"><small>Sortino anualizado</small><strong id="metric-sortino-annualized" aria-describedby="reason-sortino-annualized">—</strong><small class="metric-reason" id="reason-sortino-annualized"></small></div>
+          </div>
           <p id="metrics-state" aria-live="polite" hidden></p>
         </section>
         <p id="table-state" role="alert" hidden></p>
@@ -170,17 +182,29 @@
         profit_factor: "#metric-profit-factor", payoff: "#metric-payoff",
         expectancy: "#metric-expectancy", sharpe_per_position: "#metric-sharpe-per-position",
         sortino_per_position: "#metric-sortino-per-position",
+        sharpe_daily: "#metric-sharpe-daily", sortino_daily: "#metric-sortino-daily",
+        sharpe_annualized: "#metric-sharpe-annualized",
+        sortino_annualized: "#metric-sortino-annualized",
       };
 
       const metricReasonLabels = {
         empty_sample: "A amostra não contém posições realizadas.",
         insufficient_sample: "São necessárias pelo menos duas posições realizadas.",
+        insufficient_daily_sample: "São necessários pelo menos dois dias úteis.",
+        insufficient_annualized_sample: "São necessários pelo menos 30 dias úteis.",
         no_winning_positions: "A amostra não contém posições vencedoras.",
         no_losing_positions: "A amostra não contém posições perdedoras.",
         zero_standard_deviation: "Os resultados não possuem dispersão.",
         zero_downside_deviation: "A amostra não possui dispersão negativa.",
         numeric_overflow: "A razão excede o limite numérico disponível.",
+        invalid_opening_balance_coverage: "A cobertura do saldo de abertura ajustado é inválida.",
         realized_metrics_unavailable_for_open_status: "Métricas realizadas ficam indisponíveis para o filtro de posições abertas.",
+      };
+
+      const temporalReasonIds = {
+        sharpe_daily: "#reason-sharpe-daily", sortino_daily: "#reason-sortino-daily",
+        sharpe_annualized: "#reason-sharpe-annualized",
+        sortino_annualized: "#reason-sortino-annualized",
       };
 
       function formatMetric(name, value) {
@@ -193,7 +217,8 @@
             maximumFractionDigits: 2}).format(value);
         }
         const digits = ["profit_factor", "payoff", "sharpe_per_position",
-          "sortino_per_position"].includes(name) ? 3 : 2;
+          "sortino_per_position", "sharpe_daily", "sortino_daily",
+          "sharpe_annualized", "sortino_annualized"].includes(name) ? 3 : 2;
         return new Intl.NumberFormat("pt-BR", {minimumFractionDigits: digits,
           maximumFractionDigits: digits}).format(value);
       }
@@ -202,13 +227,37 @@
         Object.entries(metricIds).forEach(([name, selector]) => {
           const element = document.querySelector(selector);
           element.textContent = formatMetric(name, data[name]);
-          element.title = data.unavailable_reasons[name]
+          const reason = data.unavailable_reasons[name]
             ? metricReasonLabels[data.unavailable_reasons[name]] : "";
+          element.title = reason;
+          if (temporalReasonIds[name]) {
+            document.querySelector(temporalReasonIds[name]).textContent = reason;
+          }
         });
         const excluded = data.excluded_open_positions
           ? `; ${data.excluded_open_positions} abertas excluídas` : "";
         document.querySelector("#metrics-summary").textContent =
           `${data.sample_size} posições realizadas${excluded}.`;
+        const hasTemporalContract = Object.prototype.hasOwnProperty.call(
+          data, "daily_observation_days"
+        );
+        if (!hasTemporalContract) {
+          document.querySelector("#temporal-metrics-summary").textContent =
+            "Métricas temporais não fornecidas por esta versão do backend.";
+        } else {
+          const period = data.effective_date_from && data.effective_date_to
+            ? ` Período: ${data.effective_date_from} a ${data.effective_date_to}.`
+            : " Sem intervalo temporal.";
+          const missing = data.opening_balance_missing_dates?.length
+            ? ` Ausentes: ${data.opening_balance_missing_dates.join(", ")}.` : "";
+          const nonPositive = data.opening_balance_non_positive_dates?.length
+            ? ` Não positivos: ${data.opening_balance_non_positive_dates.join(", ")}.` : "";
+          document.querySelector("#temporal-metrics-summary").textContent =
+            `${data.daily_observation_days} dias úteis; saldo válido em `
+            + `${data.opening_balance_covered_days} de `
+            + `${data.opening_balance_required_days} dias com encerramentos.`
+            + period + missing + nonPositive;
+        }
         const reasons = [...new Set(Object.values(data.unavailable_reasons))]
           .map((reason) => metricReasonLabels[reason] || reason);
         setNotice("#metrics-state", reasons.join(" "), reasons.length > 0);
@@ -220,8 +269,13 @@
           element.textContent = "—";
           element.title = "";
         });
+        Object.values(temporalReasonIds).forEach((selector) => {
+          document.querySelector(selector).textContent = "";
+        });
         const summary = document.querySelector("#metrics-summary");
         if (summary) summary.textContent = message;
+        const temporalSummary = document.querySelector("#temporal-metrics-summary");
+        if (temporalSummary) temporalSummary.textContent = message;
         setNotice("#metrics-state", message, true);
       }
 

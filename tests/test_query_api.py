@@ -202,7 +202,312 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(payload["expectancy"], 20)
         self.assertAlmostEqual(payload["sharpe_per_position"], 0.3396831102433787)
         self.assertEqual(payload["sortino_per_position"], 1)
-        self.assertEqual(payload["unavailable_reasons"], {})
+        self.assertEqual(
+            payload["unavailable_reasons"],
+            dict.fromkeys(
+                (
+                    "sharpe_daily",
+                    "sortino_daily",
+                    "sharpe_annualized",
+                    "sortino_annualized",
+                ),
+                "invalid_opening_balance_coverage",
+            ),
+        )
+
+    def test_metrics_calculate_daily_ratios_from_adjusted_opening_balance(self) -> None:
+        """Use filtered Bahia days and the first global accounting adjustment."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 4, 4, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        "1", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-08-03T20:00:00-03:00", "2026-08-04T01:30:00+00:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 100, 1, 1,
+                    ),
+                    (
+                        "2", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-08-04T10:00:00-03:00", "2026-08-04T11:00:00-03:00",
+                        "closed", 1, 1, 100, 99, 0, 0, -50, 1, 1,
+                    ),
+                    (
+                        "3", "FVG", "WIN", "WINQ26", "buy",
+                        "2026-08-03T12:00:00-03:00", "2026-08-03T13:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 400, 1, 1,
+                    ),
+                    (
+                        "4", "FVG", "WIN", "WINQ26", "buy",
+                        "2026-08-04T12:00:00-03:00", "2026-08-04T13:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 300, 1, 1,
+                    ),
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO transactions("
+                "transaction_id, order_id, position_id, strategy, at, symbol_raw, direction, "
+                "volume, price, commission, tax, swap, pnl, balance, comment, import_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        "2", None, None, None, "2026-08-04T01:00:00+00:00", "", "balance",
+                        None, None, 0, 0, 0, 9000, 500, "Ajuste de Saldo", 1,
+                    ),
+                    (
+                        "10", None, None, None, "2026-08-04T01:00:00+00:00", "", "balance",
+                        None, None, 0, 0, 0, 0, 1000, "Ajuste de Saldo", 1,
+                    ),
+                    (
+                        "20", None, None, None, "2026-08-04T08:00:00-03:00", "WINQ26", "out",
+                        1, 100, -2, -1, 0, 20, 1017, "operacional", 1,
+                    ),
+                    (
+                        "21", None, None, None, "2026-08-04T09:00:00-03:00", "", "in",
+                        None, None, 0, 0, 0, 0, 1017, "Ajuste de Saldo", 1,
+                    ),
+                    (
+                        "22", None, None, None, "2026-08-04T12:00:00-03:00", "", "balance",
+                        None, None, 0, 0, 0, 0, 2000, "Ajuste de Saldo", 1,
+                    ),
+                ],
+            )
+
+        payload = self._request("/api/metrics?strategy=Turtle").json()
+
+        self.assertEqual(payload["net_pnl"], 50)
+        self.assertEqual(payload["effective_date_from"], "2026-08-03")
+        self.assertEqual(payload["effective_date_to"], "2026-08-04")
+        self.assertEqual(payload["daily_observation_days"], 2)
+        self.assertEqual(payload["opening_balance_required_days"], 2)
+        self.assertEqual(payload["opening_balance_covered_days"], 2)
+        self.assertAlmostEqual(payload["sharpe_daily"], 0.42426406871192857)
+        self.assertAlmostEqual(payload["sortino_daily"], 2.1213203435596424)
+        self.assertIsNone(payload["sharpe_annualized"])
+        self.assertEqual(
+            payload["unavailable_reasons"]["sharpe_annualized"],
+            "insufficient_annualized_sample",
+        )
+
+    def test_metrics_report_each_invalid_opening_balance_day(self) -> None:
+        """Keep position metrics while temporal balance coverage is invalid."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        "1", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-08-03T10:00:00-03:00", "2026-08-03T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 10, 1, 1,
+                    ),
+                    (
+                        "2", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-08-04T10:00:00-03:00", "2026-08-04T11:00:00-03:00",
+                        "closed", 1, 1, 100, 99, 0, 0, -5, 1, 1,
+                    ),
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO transactions("
+                "transaction_id, order_id, position_id, strategy, at, symbol_raw, direction, "
+                "volume, price, commission, tax, swap, pnl, balance, comment, import_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        "9", None, None, None, "2026-08-03T09:00:00-03:00", "", "balance",
+                        None, None, 0, 0, 0, 0, None, "Ajuste de Saldo", 1,
+                    ),
+                    (
+                        "10", None, None, None, "2026-08-04T09:00:00-03:00", "", "balance",
+                        None, None, 0, 0, 0, 0, 0, "Ajuste de Saldo", 1,
+                    ),
+                ],
+            )
+
+        payload = self._request("/api/metrics").json()
+
+        self.assertEqual(payload["net_pnl"], 5)
+        self.assertEqual(payload["opening_balance_required_days"], 2)
+        self.assertEqual(payload["opening_balance_covered_days"], 0)
+        self.assertEqual(payload["opening_balance_missing_days"], 1)
+        self.assertEqual(payload["opening_balance_missing_dates"], ["2026-08-03"])
+        self.assertEqual(payload["opening_balance_non_positive_days"], 1)
+        self.assertEqual(
+            payload["opening_balance_non_positive_dates"], ["2026-08-04"]
+        )
+        for metric in (
+            "sharpe_daily", "sortino_daily", "sharpe_annualized", "sortino_annualized"
+        ):
+            with self.subTest(metric=metric):
+                self.assertIsNone(payload[metric])
+                self.assertEqual(
+                    payload["unavailable_reasons"][metric],
+                    "invalid_opening_balance_coverage",
+                )
+
+    def test_metrics_honor_explicit_empty_weekday_interval(self) -> None:
+        """Represent an explicit empty period as zero-filled weekdays."""
+        self._seed_projection()
+
+        payload = self._request(
+            "/api/metrics?strategy=Missing&date_from=2026-08-03&date_to=2026-08-07"
+        ).json()
+
+        self.assertEqual(payload["effective_date_from"], "2026-08-03")
+        self.assertEqual(payload["effective_date_to"], "2026-08-07")
+        self.assertEqual(payload["daily_observation_days"], 5)
+        self.assertEqual(payload["opening_balance_required_days"], 0)
+        self.assertEqual(
+            payload["unavailable_reasons"]["sharpe_daily"],
+            "zero_standard_deviation",
+        )
+        self.assertEqual(
+            payload["unavailable_reasons"]["sortino_daily"],
+            "zero_downside_deviation",
+        )
+
+    def test_metrics_complete_one_sided_empty_period_from_account_history(self) -> None:
+        """Complete an empty one-sided filter globally without inverting its range."""
+        self._seed_projection()
+
+        within_history = self._request(
+            "/api/metrics?strategy=Missing&date_from=2026-08-01"
+        ).json()
+        after_history = self._request(
+            "/api/metrics?strategy=Missing&date_from=2026-08-04"
+        ).json()
+        through_history = self._request(
+            "/api/metrics?strategy=Missing&date_to=2026-08-03"
+        ).json()
+
+        self.assertEqual(within_history["effective_date_from"], "2026-08-01")
+        self.assertEqual(within_history["effective_date_to"], "2026-08-03")
+        self.assertEqual(within_history["daily_observation_days"], 1)
+        self.assertEqual(through_history["effective_date_from"], "2026-08-01")
+        self.assertEqual(through_history["effective_date_to"], "2026-08-03")
+        self.assertEqual(through_history["daily_observation_days"], 1)
+        self.assertIsNone(after_history["effective_date_from"])
+        self.assertIsNone(after_history["effective_date_to"])
+        self.assertEqual(after_history["daily_observation_days"], 0)
+        self.assertEqual(
+            after_history["unavailable_reasons"]["sharpe_daily"], "empty_sample"
+        )
+
+    def test_metrics_annualize_a_thirty_weekday_sample(self) -> None:
+        """Annualize daily ratios only after thirty inclusive weekdays."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        "1", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-08-03T10:00:00-03:00", "2026-08-03T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 100, 1, 1,
+                    ),
+                    (
+                        "2", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-09-11T10:00:00-03:00", "2026-09-11T11:00:00-03:00",
+                        "closed", 1, 1, 100, 99, 0, 0, -50, 1, 1,
+                    ),
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO transactions("
+                "transaction_id, order_id, position_id, strategy, at, symbol_raw, direction, "
+                "volume, price, commission, tax, swap, pnl, balance, comment, import_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        "10", None, None, None, "2026-08-03T09:00:00-03:00", "", "balance",
+                        None, None, 0, 0, 0, 0, 1000, "Ajuste de Saldo", 1,
+                    ),
+                    (
+                        "20", None, None, None, "2026-09-11T09:00:00-03:00", "", "balance",
+                        None, None, 0, 0, 0, 0, 1000, "Ajuste de Saldo", 1,
+                    ),
+                ],
+            )
+
+        payload = self._request("/api/metrics").json()
+        from_payload = self._request("/api/metrics?date_from=2026-08-04").json()
+        to_payload = self._request("/api/metrics?date_to=2026-09-10").json()
+
+        self.assertEqual(payload["daily_observation_days"], 30)
+        self.assertAlmostEqual(payload["sharpe_daily"], 0.08054623361424615)
+        self.assertAlmostEqual(payload["sortino_daily"], 0.18257418583505536)
+        self.assertAlmostEqual(payload["sharpe_annualized"], 1.2786318191172394)
+        self.assertAlmostEqual(payload["sortino_annualized"], 2.8982753492378874)
+        self.assertEqual(from_payload["effective_date_from"], "2026-08-04")
+        self.assertEqual(from_payload["effective_date_to"], "2026-09-11")
+        self.assertEqual(from_payload["daily_observation_days"], 29)
+        self.assertEqual(from_payload["opening_balance_required_days"], 1)
+        self.assertEqual(to_payload["effective_date_from"], "2026-08-03")
+        self.assertEqual(to_payload["effective_date_to"], "2026-09-10")
+        self.assertEqual(to_payload["daily_observation_days"], 29)
+        self.assertEqual(to_payload["opening_balance_required_days"], 1)
+
+    def test_metrics_isolate_temporal_numeric_overflow(self) -> None:
+        """Keep position totals when daily returns exceed numeric representation."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 2, 2, 0, 0),
+            )
+            insert_positions(
+                connection,
+                [
+                    (
+                        "1", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-08-03T10:00:00-03:00", "2026-08-03T11:00:00-03:00",
+                        "closed", 1, 1, 100, 101, 0, 0, 1e308, 1, 1,
+                    ),
+                    (
+                        "2", "Turtle", "WIN", "WINQ26", "buy",
+                        "2026-08-04T10:00:00-03:00", "2026-08-04T11:00:00-03:00",
+                        "closed", 1, 1, 100, 99, 0, 0, -1e308, 1, 1,
+                    ),
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO transactions("
+                "transaction_id, order_id, position_id, strategy, at, symbol_raw, direction, "
+                "volume, price, commission, tax, swap, pnl, balance, comment, import_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        str(identifier), None, None, None, timestamp, "", "balance",
+                        None, None, 0, 0, 0, 0, 1e-308, "Ajuste de Saldo", 1,
+                    )
+                    for identifier, timestamp in (
+                        (10, "2026-08-03T09:00:00-03:00"),
+                        (20, "2026-08-04T09:00:00-03:00"),
+                    )
+                ],
+            )
+
+        response = self._request("/api/metrics")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["net_pnl"], 0)
+        for metric in (
+            "sharpe_daily", "sortino_daily", "sharpe_annualized", "sortino_annualized"
+        ):
+            with self.subTest(metric=metric):
+                self.assertIsNone(response.json()[metric])
+                self.assertEqual(
+                    response.json()["unavailable_reasons"][metric], "numeric_overflow"
+                )
 
     def test_metrics_keep_empty_realized_sums_available(self) -> None:
         """Distinguish an empty realized sample from unavailable metrics."""
@@ -221,6 +526,7 @@ class QueryApiTests(unittest.TestCase):
         for metric in (
             "win_rate", "profit_factor", "payoff", "expectancy",
             "sharpe_per_position", "sortino_per_position",
+            "sharpe_daily", "sortino_daily", "sharpe_annualized", "sortino_annualized",
         ):
             with self.subTest(metric=metric):
                 self.assertIsNone(payload[metric])
