@@ -58,9 +58,98 @@ class QueryApiTests(unittest.TestCase):
             DATABASE_PATH=self.database_path,
         )
 
+    def test_monetary_episodes_use_aggregated_instants_and_filter_end(self):
+        """Select distinct episodes after aggregating offset-equivalent exits."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES "
+                "(1, 'fixture', 'hash', '2026-08-10T12:00:00Z', 4, 4, 0, 0)"
+            )
+            insert_positions(connection, [
+                (str(index), "Turtle", "WIN", "WINQ26", "buy",
+                 "2026-08-01T10:00:00Z", at, "closed", 1, 1, 100, 110,
+                 0, 0, pnl, 1, 1)
+                for index, (at, pnl) in enumerate([
+                    ("2026-08-02T12:00:00Z", -20),
+                    ("2026-08-02T09:00:00-03:00", 10),
+                    ("2026-08-03T12:00:00Z", 20),
+                    ("2026-08-04T12:00:00Z", -5),
+                ])
+            ])
+        response = self._request("/api/metrics?date_from=2026-08-01&date_to=2026-08-10")
+        self.assertEqual(response.status_code, 200)
+        risk = response.json()["monetary_drawdown"]
+        self.assertEqual(risk["state"], "available")
+        self.assertEqual(risk["deepest_episode"], {
+            "depth": -10, "peak_at": "2026-08-01T03:00:00Z",
+            "valley_at": "2026-08-02T12:00:00Z",
+            "recovery_at": "2026-08-03T12:00:00Z", "duration_days": 2,
+        })
+        self.assertEqual(risk["longest_episode"], {
+            "depth": -5, "peak_at": "2026-08-03T12:00:00Z",
+            "valley_at": "2026-08-04T12:00:00Z", "recovery_at": None,
+            "duration_days": 7,
+        })
+
     def _request(self, path: str):
         with self._paths():
             return get_asgi(app, path)
+
+    def test_monetary_drawdown_states_and_shared_filters(self):
+        """Risk follows shared filters and distinguishes absent and unavailable data."""
+        self._seed_projection()
+        winning = self._request(
+            "/api/metrics?strategy=Turtle&symbol_family=WIN"
+            "&direction=buy&association=associated"
+        ).json()
+        self.assertEqual(winning["monetary_drawdown"], {
+            "state": "no_drawdown", "deepest_episode": None, "longest_episode": None,
+        })
+        empty = self._request("/api/metrics?strategy=Missing").json()
+        self.assertEqual(empty["monetary_drawdown"]["state"], "empty_sample")
+        self.assertIsNone(empty["monetary_drawdown"]["deepest_episode"])
+        opened = self._request("/api/metrics?status=open").json()
+        self.assertEqual(opened["monetary_drawdown"]["state"], "unavailable")
+        self.assertEqual(opened["unavailable_reasons"]["monetary_drawdown"],
+                         "realized_metrics_unavailable_for_open_status")
+        closed = self._request("/api/metrics").json()
+        all_positions = self._request("/api/metrics?status=all").json()
+        self.assertEqual(closed["monetary_drawdown"], all_positions["monetary_drawdown"])
+        self.assertEqual(all_positions["excluded_open_positions"], 1)
+
+    def test_monetary_same_instant_decimal_losses_recover_exactly(self):
+        """Aggregation preserves exact decimal recovery across later timestamps."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES "
+                "(1, 'fixture', 'hash', '2026-08-10T12:00:00Z', 3, 3, 0, 0)"
+            )
+            insert_positions(connection, [
+                (str(index), "Turtle", "WIN", "WINQ26", "buy",
+                 "2026-08-01T10:00:00Z", at, "closed", 1, 1, 100, 110,
+                 0, 0, pnl, 1, 1)
+                for index, (at, pnl) in enumerate([
+                    ("2026-08-02T12:00:00Z", -0.1),
+                    ("2026-08-02T09:00:00-03:00", -0.2),
+                    ("2026-08-03T12:00:00Z", 0.3),
+                ])
+            ])
+        payload = self._request("/api/metrics?date_to=2026-08-10").json()
+        self.assertEqual(payload["monetary_drawdown"]["deepest_episode"], {
+            "depth": -0.3, "peak_at": "2026-08-02T03:00:00Z",
+            "valley_at": "2026-08-02T12:00:00Z",
+            "recovery_at": "2026-08-03T12:00:00Z", "duration_days": 1,
+        })
+
+    def test_monetary_open_episode_uses_effective_period_without_date_filters(self):
+        """Omitted dates use the selected closed-position period."""
+        self._seed_projection()
+        payload = self._request("/api/metrics?strategy=FVG").json()
+        self.assertEqual(payload["monetary_drawdown"]["deepest_episode"], {
+            "depth": -21, "peak_at": "2026-08-03T03:00:00Z",
+            "valley_at": "2026-08-03T12:00:00Z", "recovery_at": None,
+            "duration_days": 0,
+        })
 
     @contextmanager
     def _projection(self) -> Iterator[sqlite3.Connection]:

@@ -16,6 +16,31 @@ As séries diárias usam `America/Bahia`, preenchem dias úteis sem encerramento
 
 O drawdown monetário é calculado sobre o P&L cumulativo das posições filtradas. O drawdown percentual usa um índice de performance iniciado em 100 e encadeado pelos retornos diários, evitando que ajustes contábeis sejam confundidos com performance. Os episódios de maior profundidade e maior duração são reportados separadamente, com pico, vale e recuperação; episódios não recuperados usam o fim da amostra como limite de duração e mantêm a recuperação nula. Valores percentuais não são limitados artificialmente a 100%.
 
+## Episódios monetários (Issue #16)
+
+A curva começa em zero na meia-noite de `effective_date_from` em `America/Bahia`.
+Os limites efetivos seguem a mesma resolução das métricas temporais, inclusive quando
+os filtros de data são omitidos. Encerramentos no mesmo instante são agregados em UTC
+antes de atualizar a curva. A soma usa a representação decimal dos valores monetários
+de forma exata, evitando que resíduos binários impeçam uma recuperação; não há
+arredondamento para centavos no cálculo.
+
+Um episódio começa abaixo do pico e termina ao atingir ou superar esse pico.
+Picos e vales iguais preservam a primeira ocorrência. `depth` é negativo, calculado
+como vale menos pico. `duration_days` é a diferença entre datas civis em Bahia,
+sem adicionar um dia: episódios intradiários podem durar zero dias. Para episódios
+abertos, o limite é `effective_date_to`, mesmo sem operações nessa data.
+
+`GET /api/metrics` publica `monetary_drawdown` com `state`, `deepest_episode` e
+`longest_episode`. Cada episódio contém `depth`, `peak_at`, `valley_at`, `recovery_at`
+e `duration_days`; timestamps são ISO 8601 UTC com sufixo `Z`. Empates entre episódios
+selecionam o mais antigo; o mesmo episódio pode ocupar os dois campos. Os estados são
+`available`, `no_drawdown`, `empty_sample` e `unavailable`; os últimos três mantêm
+ambos os episódios nulos. Indisponibilidade usa `unavailable_reasons.monetary_drawdown`.
+Cobertura de saldo ausente não impede drawdown monetário. Agregados que excedem a
+representação numérica na leitura mantêm o erro de projeção existente; overflow
+durante o cálculo do drawdown produz `unavailable`, sem publicar episódios parciais.
+
 ## Consequências
 
 - Resultados monetários permanecem disponíveis quando razões estatísticas não podem ser calculadas.

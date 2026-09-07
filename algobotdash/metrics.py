@@ -6,7 +6,102 @@ import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timezone
+from fractions import Fraction
+from typing import TypedDict
+from zoneinfo import ZoneInfo
+
+METRIC_TIMEZONE = ZoneInfo("America/Bahia")
+
+
+class DrawdownEpisode(TypedDict):
+    """Public episode shared by depth and duration selectors."""
+
+    depth: float
+    peak_at: str
+    valley_at: str
+    recovery_at: str | None
+    duration_days: int
+
+
+class MonetaryDrawdown(TypedDict):
+    """Monetary risk state; absent episodes are never fabricated."""
+
+    state: str
+    deepest_episode: DrawdownEpisode | None
+    longest_episode: DrawdownEpisode | None
+
+
+# The single chronological scan keeps episode state together.
+# pylint: disable=too-many-branches
+def calculate_monetary_drawdown(
+    events: Sequence[tuple[datetime, float | Fraction]],
+    *,
+    period: tuple[date, date] | None,
+    realized_available: bool = True,
+) -> MonetaryDrawdown:
+    """Scan chronological, timestamp-aggregated P&L using civil-day duration."""
+    result: MonetaryDrawdown = {
+        "state": "empty_sample", "deepest_episode": None, "longest_episode": None,
+    }
+    if not realized_available:
+        result["state"] = "unavailable"
+        return result
+    if not events or period is None:
+        return result
+    peak_at = datetime.combine(period[0], time.min, METRIC_TIMEZONE)
+    peak = cumulative = Fraction(0)
+    valley_depth = Fraction(0)
+    episode: DrawdownEpisode | None = None
+    episodes: list[DrawdownEpisode] = []
+    try:
+        for at, pnl in events:
+            # Decimal text preserves monetary equality without rounding to cents.
+            cumulative += Fraction(str(pnl))
+            exact_depth = cumulative - peak
+            depth = float(exact_depth)
+            if not math.isfinite(float(cumulative)) or not math.isfinite(depth):
+                raise OverflowError("non-finite drawdown")
+            stamp = at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            if exact_depth < 0:
+                if episode is None:
+                    valley_depth = exact_depth
+                    episode = {
+                        "depth": depth,
+                        "peak_at": peak_at.astimezone(timezone.utc).isoformat().replace(
+                            "+00:00", "Z"
+                        ),
+                        "valley_at": stamp, "recovery_at": None, "duration_days": 0,
+                    }
+                elif exact_depth < valley_depth:
+                    valley_depth = exact_depth
+                    episode["depth"] = depth
+                    episode["valley_at"] = stamp
+            else:
+                if episode is not None:
+                    episode["recovery_at"] = stamp
+                    episode["duration_days"] = (
+                        at.astimezone(METRIC_TIMEZONE).date()
+                        - peak_at.astimezone(METRIC_TIMEZONE).date()
+                    ).days
+                    episodes.append(episode)
+                    episode = None
+                if cumulative > peak:
+                    peak, peak_at = cumulative, at
+        if episode is not None:
+            episode["duration_days"] = (
+                period[1] - peak_at.astimezone(METRIC_TIMEZONE).date()
+            ).days
+            episodes.append(episode)
+    except (OverflowError, ValueError):
+        result["state"] = "unavailable"
+        return result
+    result["state"] = "available" if episodes else "no_drawdown"
+    if episodes:
+        result["deepest_episode"] = min(episodes, key=lambda item: item["depth"])
+        result["longest_episode"] = max(episodes, key=lambda item: item["duration_days"])
+    return result
+# pylint: enable=too-many-branches
 
 METRIC_NAMES = (
     "net_pnl",
@@ -197,7 +292,7 @@ def _business_days(date_from: date, date_to: date) -> int:
     )
 
 
-def _effective_period(
+def effective_metric_period(
     daily_pnl: Mapping[date, float],
     *,
     date_from: date | None,
@@ -412,7 +507,7 @@ def calculate_temporal_metrics(
     realized_available: bool = True,
 ) -> dict[str, object]:
     """Return audited daily and annualized ratios for one filtered sample."""
-    period = _effective_period(
+    period = effective_metric_period(
         daily_pnl,
         date_from=date_from,
         date_to=date_to,

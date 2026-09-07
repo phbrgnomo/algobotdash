@@ -13,7 +13,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import ConfigurationError, load_config
 from .environment import load_environment
-from .metrics import calculate_position_metrics, calculate_temporal_metrics
+from .metrics import (
+    calculate_monetary_drawdown,
+    calculate_position_metrics,
+    calculate_temporal_metrics,
+    effective_metric_period,
+)
 from .storage import (
     PositionFilters,
     ProjectionUnavailableError,
@@ -269,6 +274,21 @@ async def metrics_endpoint(
         payload.update(temporal)
         position_reasons = cast(dict[str, str], payload["unavailable_reasons"])
         position_reasons.update(temporal_reasons)
+        drawdown = calculate_monetary_drawdown(
+            sample.closed_events,
+            period=effective_metric_period(
+                sample.daily_pnl, date_from=date_from, date_to=date_to,
+                global_first_closed_date=sample.global_first_closed_date,
+                global_last_closed_date=sample.global_last_closed_date,
+            ),
+            realized_available=status != "open",
+        )
+        payload["monetary_drawdown"] = drawdown
+        if drawdown["state"] == "unavailable":
+            position_reasons["monetary_drawdown"] = (
+                "realized_metrics_unavailable_for_open_status"
+                if status == "open" else "numeric_overflow"
+            )
         return payload
     except OverflowError as exc:
         raise _projection_error(

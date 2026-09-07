@@ -135,7 +135,7 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "metric-sharpe-per-position", "metric-sortino-per-position", "metric-sharpe-daily",
   "metric-sortino-daily", "metric-sharpe-annualized", "metric-sortino-annualized",
   "reason-sharpe-daily", "reason-sortino-daily", "reason-sharpe-annualized",
-  "reason-sortino-annualized"];
+  "reason-sortino-annualized", "risk-deepest", "risk-longest", "risk-deepest-detail", "risk-longest-detail"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -151,6 +151,11 @@ const pendingPositions = [];
 const pendingMetrics = [];
 const pendingFilters = [];
 const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
+  monetary_drawdown: {state: "available", deepest_episode: {depth: -10,
+    peak_at: "2026-08-01T03:00:00Z", valley_at: "2026-08-02T12:00:00Z",
+    recovery_at: null, duration_days: 1}, longest_episode: {depth: -10,
+    peak_at: "2026-08-01T03:00:00Z", valley_at: "2026-08-02T12:00:00Z",
+    recovery_at: null, duration_days: 1}},
   gross_profit: 20, gross_loss: -10, winning_trades: 1, losing_trades: 1,
   win_rate: 0.5, profit_factor: 2, payoff: 2,
   expectancy: 5, sharpe_per_position: 0.5, sortino_per_position: 0.5,
@@ -198,6 +203,9 @@ const watchdog = setTimeout(() => {
 (async () => {
   await flush(); await flush();
 
+  if (elements["#risk-deepest"].textContent !== "-10,00") throw new Error("missing monetary depth");
+  if (!elements["#risk-longest-detail"].textContent.includes("Em andamento")) throw new Error("missing open episode state");
+
   metricMode = "pending";
   elements["#filter-strategy"].value = "Turtle";
   elements["#filter-strategy"].listeners.change();
@@ -223,6 +231,7 @@ const watchdog = setTimeout(() => {
   await flush(); await flush();
   if (elements["#page-summary"].textContent !== "Projeção indisponível.") throw new Error("stale position escaped terminal state");
   if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("stale metric escaped terminal state");
+  if (elements["#risk-deepest"].textContent !== "—") throw new Error("stale drawdown escaped terminal state");
   if (elements["#filter-strategy"].children.some((option) => option.value === "Stale")) throw new Error("stale filter catalog escaped terminal state");
 
   positionMode = "normal";
@@ -298,7 +307,7 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "metric-sharpe-per-position", "metric-sortino-per-position", "metric-sharpe-daily",
   "metric-sortino-daily", "metric-sharpe-annualized", "metric-sortino-annualized",
   "reason-sharpe-daily", "reason-sortino-daily", "reason-sharpe-annualized",
-  "reason-sortino-annualized"];
+  "reason-sortino-annualized", "risk-deepest", "risk-longest", "risk-deepest-detail", "risk-longest-detail"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -476,6 +485,21 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   }
   const legacyPayload = {...metricPayload};
   delete legacyPayload.daily_observation_days;
+  context.renderMetrics(legacyPayload);
+  for (const [state, expected] of [["empty_sample", "Sem dados"],
+    ["no_drawdown", "Sem drawdown"], ["unavailable", "Indisponível"]]) {
+    context.renderMetrics({...metricPayload, monetary_drawdown: {state,
+      deepest_episode: null, longest_episode: null}});
+    if (elements["#risk-deepest"].textContent !== "—") throw new Error("fabricated episode");
+    if (!elements["#risk-longest-detail"].textContent.includes(expected)) throw new Error("missing risk state");
+  }
+  const recovered = {depth: -20, peak_at: "2026-08-01T12:00:00Z",
+    valley_at: "2026-08-02T12:00:00Z", recovery_at: "2026-08-03T12:00:00Z", duration_days: 2};
+  context.renderMetrics({...metricPayload, monetary_drawdown: {state: "available",
+    deepest_episode: recovered, longest_episode: recovered}});
+  if (elements["#risk-longest"].textContent !== "2 dias") throw new Error("missing civil duration");
+  if (elements["#risk-deepest-detail"].textContent.includes("Em andamento")) throw new Error("recovered episode marked open");
+  if (!elements["#risk-deepest-detail"].textContent.includes("03/08/2026")) throw new Error("missing recovery date");
   context.renderMetrics(legacyPayload);
   if (!elements["#temporal-metrics-summary"].textContent.includes("não fornecidas")) {
     throw new Error("legacy backend was presented as real zero coverage");
