@@ -24,8 +24,8 @@ from .storage import (
     ProjectionUnavailableError,
     read_filter_options,
     read_imports,
-    read_position_orders,
     read_metric_sample,
+    read_position_orders,
     read_positions,
     read_strategy_keys,
 )

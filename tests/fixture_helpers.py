@@ -11,7 +11,6 @@ import httpx
 from openpyxl import Workbook
 from starlette.types import ASGIApp
 
-
 _POSITION_INSERT = (
     "INSERT INTO positions("
     "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "

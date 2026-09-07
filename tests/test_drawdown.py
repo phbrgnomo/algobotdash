@@ -1,7 +1,7 @@
 """Public monetary episode calculation examples."""
 
-from datetime import date, datetime
 import unittest
+from datetime import date, datetime
 
 from algobotdash.metrics import calculate_monetary_drawdown
 
