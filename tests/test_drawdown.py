@@ -9,6 +9,14 @@ from algobotdash.metrics import calculate_monetary_drawdown
 class DrawdownTests(unittest.TestCase):
     """Verify episodes against worked cumulative P&L paths."""
 
+    def test_reversed_reporting_period_is_rejected(self):
+        """An open loss must not produce a negative civil-day duration."""
+        with self.assertRaisesRegex(ValueError, "period end must not precede period start"):
+            calculate_monetary_drawdown(
+                ((datetime.fromisoformat("2026-08-02T12:00:00+00:00"), -10.0),),
+                period=(date(2026, 8, 2), date(2026, 8, 1)),
+            )
+
     def test_naive_event_timestamps_are_rejected_before_calculation(self):
         """Reject ambiguous dates even when they would not serialize an episode."""
         aware = datetime.fromisoformat("2026-08-01T12:00:00+00:00")
