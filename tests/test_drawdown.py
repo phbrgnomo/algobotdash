@@ -9,6 +9,25 @@ from algobotdash.metrics import calculate_monetary_drawdown
 class DrawdownTests(unittest.TestCase):
     """Verify episodes against worked cumulative P&L paths."""
 
+    def test_naive_event_timestamps_are_rejected_before_calculation(self):
+        """Reject ambiguous dates even when they would not serialize an episode."""
+        aware = datetime.fromisoformat("2026-08-01T12:00:00+00:00")
+        for naive_index in range(3):
+            with self.subTest(naive_index=naive_index):
+                events = tuple(
+                    (aware.replace(tzinfo=None) if index == naive_index else aware, pnl)
+                    for index, pnl in enumerate((10.0, -5.0, 5.0))
+                )
+                with self.assertRaisesRegex(ValueError, "timezone-aware"):
+                    calculate_monetary_drawdown(
+                        events, period=(date(2026, 8, 1), date(2026, 8, 2))
+                    )
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            calculate_monetary_drawdown(
+                ((aware.replace(tzinfo=None), 10.0),),
+                period=(date(2026, 8, 1), date(2026, 8, 2)),
+            )
+
     def test_equal_valleys_and_equal_episodes_keep_first_occurrence(self):
         """Repeated minima and equal selectors preserve chronological precedence."""
         result = calculate_monetary_drawdown(tuple(

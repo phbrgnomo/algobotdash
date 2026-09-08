@@ -520,8 +520,6 @@ def read_metric_sample(path: Path, filters: PositionFilters) -> MetricSample:
                 (at, sum((Fraction(str(value)) for value in values), Fraction(0)))
                 for at, values in sorted(pnl_by_instant.items())
             )
-            if not all(math.isfinite(pnl) for _, pnl in closed_events):
-                raise ValueError("P&L por instante não finito")
         except (sqlite3.Error, TypeError, ValueError, OverflowError) as exc:
             raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
         return MetricSample(

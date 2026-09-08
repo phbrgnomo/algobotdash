@@ -147,6 +147,20 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(payload["unavailable_reasons"]["monetary_drawdown"],
                          "numeric_overflow")
 
+        # The same decimal overflow must stay isolated when both positions close
+        # in one instant and storage creates a single exact Fraction aggregate.
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("UPDATE positions SET exit_at = '2026-08-02T12:00:00+00:00'")
+            connection.commit()
+        finally:
+            connection.close()
+        simultaneous = self._request("/api/metrics")
+        self.assertEqual(simultaneous.status_code, 200)
+        self.assertEqual(simultaneous.json()["monetary_drawdown"], payload["monetary_drawdown"])
+        self.assertEqual(simultaneous.json()["unavailable_reasons"]["monetary_drawdown"],
+                         "numeric_overflow")
+
     def test_monetary_same_instant_decimal_losses_recover_exactly(self):
         """Aggregation preserves exact decimal recovery across later timestamps."""
         with self._projection() as connection:

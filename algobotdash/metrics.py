@@ -108,11 +108,14 @@ def calculate_monetary_drawdown(
     period: tuple[date, date] | None,
     realized_available: bool = True,
 ) -> MonetaryDrawdown:
-    """Scan chronological, timestamp-aggregated P&L using civil-day duration."""
+    """Scan chronological P&L; reject ambiguous timestamps with ValueError."""
     if not realized_available:
         return _empty_drawdown("unavailable")
     if not events or period is None:
         return _empty_drawdown("empty_sample")
+    for at, _ in events:
+        if at.tzinfo is None or at.utcoffset() is None:
+            raise ValueError("episode timestamps must be timezone-aware")
     try:
         episodes = _monetary_episodes(events, period)
     except (OverflowError, ValueError):
