@@ -4,9 +4,131 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timezone
+from fractions import Fraction
+from typing import TypedDict
+from zoneinfo import ZoneInfo
+
+METRIC_TIMEZONE = ZoneInfo("America/Bahia")
+
+
+class DrawdownEpisode(TypedDict):
+    """Public episode shared by depth and duration selectors."""
+
+    depth: float
+    peak_at: str
+    valley_at: str
+    recovery_at: str | None
+    duration_days: int
+
+
+class MonetaryDrawdown(TypedDict):
+    """Monetary risk state; absent episodes are never fabricated."""
+
+    state: str
+    deepest_episode: DrawdownEpisode | None
+    longest_episode: DrawdownEpisode | None
+
+
+def _utc_iso(at: datetime) -> str:
+    """Serialize episode instants using the public UTC contract."""
+    return at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+@dataclass
+class _DrawdownValley:
+    """Keep an active episode's earliest minimum and its original peak."""
+
+    peak_at: datetime
+    valley_at: datetime
+    depth: Fraction
+
+    def observe(self, at: datetime, depth: Fraction) -> None:
+        """Retain the first occurrence when minima tie."""
+        if depth < self.depth:
+            self.valley_at, self.depth = at, depth
+
+    def serialize(self, end: date, recovery_at: datetime | None = None) -> DrawdownEpisode:
+        """Close duration at recovery or the effective period's final civil day."""
+        return {
+            "depth": float(self.depth),
+            "peak_at": _utc_iso(self.peak_at),
+            "valley_at": _utc_iso(self.valley_at),
+            "recovery_at": _utc_iso(recovery_at) if recovery_at is not None else None,
+            "duration_days": (end - self.peak_at.astimezone(METRIC_TIMEZONE).date()).days,
+        }
+
+
+def _monetary_depths(
+    events: Sequence[tuple[datetime, float | Fraction]], start: date,
+) -> Iterator[tuple[datetime, datetime, Fraction]]:
+    """Yield exact depths against the earliest peak, rejecting numeric overflow."""
+    peak_at = datetime.combine(start, time.min, METRIC_TIMEZONE)
+    peak = cumulative = Fraction(0)
+    for at, pnl in events:
+        # Decimal text preserves monetary equality without rounding to cents.
+        cumulative += Fraction(str(pnl))
+        depth = cumulative - peak
+        if not math.isfinite(float(cumulative)) or not math.isfinite(float(depth)):
+            raise OverflowError("non-finite drawdown")
+        yield at, peak_at, depth
+        if cumulative > peak:
+            peak, peak_at = cumulative, at
+
+
+def _monetary_episodes(
+    events: Sequence[tuple[datetime, float | Fraction]], period: tuple[date, date],
+) -> list[DrawdownEpisode]:
+    """Collect recovered episodes and finalize any open episode at the period end."""
+    episodes: list[DrawdownEpisode] = []
+    valley: _DrawdownValley | None = None
+    for at, peak_at, depth in _monetary_depths(events, period[0]):
+        if depth < 0:
+            if valley is None:
+                valley = _DrawdownValley(peak_at, at, depth)
+            valley.observe(at, depth)
+        elif valley is not None:
+            episodes.append(valley.serialize(at.astimezone(METRIC_TIMEZONE).date(), at))
+            valley = None
+    if valley is not None:
+        episodes.append(valley.serialize(period[1]))
+    return episodes
+
+
+def _empty_drawdown(state: str) -> MonetaryDrawdown:
+    """Represent absent or unavailable episodes without fabricated selectors."""
+    return {"state": state, "deepest_episode": None, "longest_episode": None}
+
+
+def calculate_monetary_drawdown(
+    events: Sequence[tuple[datetime, float | Fraction]],
+    *,
+    period: tuple[date, date] | None,
+    realized_available: bool = True,
+) -> MonetaryDrawdown:
+    """Scan chronological P&L; reject reversed periods and ambiguous timestamps."""
+    if not realized_available:
+        return _empty_drawdown("unavailable")
+    if not events or period is None:
+        return _empty_drawdown("empty_sample")
+    if period[1] < period[0]:
+        raise ValueError("period end must not precede period start")
+    for at, _ in events:
+        if at.tzinfo is None or at.utcoffset() is None:
+            raise ValueError("episode timestamps must be timezone-aware")
+    try:
+        episodes = _monetary_episodes(events, period)
+    except (OverflowError, ValueError):
+        return _empty_drawdown("unavailable")
+    if not episodes:
+        return _empty_drawdown("no_drawdown")
+    return {
+        "state": "available",
+        "deepest_episode": min(episodes, key=lambda item: item["depth"]),
+        "longest_episode": max(episodes, key=lambda item: item["duration_days"]),
+    }
 
 METRIC_NAMES = (
     "net_pnl",
@@ -197,7 +319,7 @@ def _business_days(date_from: date, date_to: date) -> int:
     )
 
 
-def _effective_period(
+def effective_metric_period(
     daily_pnl: Mapping[date, float],
     *,
     date_from: date | None,
@@ -412,7 +534,7 @@ def calculate_temporal_metrics(
     realized_available: bool = True,
 ) -> dict[str, object]:
     """Return audited daily and annualized ratios for one filtered sample."""
-    period = _effective_period(
+    period = effective_metric_period(
         daily_pnl,
         date_from=date_from,
         date_to=date_to,

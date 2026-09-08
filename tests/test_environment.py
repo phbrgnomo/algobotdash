@@ -21,14 +21,10 @@ class EnvironmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="algobotdash-env-tests-") as raw_dir:
             path = Path(raw_dir) / ".env"
             _ = path.write_text(
-                "\n".join(
-                    [
-                        "# local configuration",
-                        "ALGOBOTDASH_CONFIG=file-config.yaml",
-                        "export ALGOBOTDASH_DATABASE='data/local.sqlite'",
-                        'QUOTED_VALUE="value with spaces"',
-                    ]
-                ),
+                "# local configuration\n"
+                "ALGOBOTDASH_CONFIG=file-config.yaml\n"
+                "export ALGOBOTDASH_DATABASE='data/local.sqlite'\n"
+                'QUOTED_VALUE="value with spaces"',
                 encoding="utf-8",
             )
             environment = {"ALGOBOTDASH_CONFIG": "process-config.yaml"}

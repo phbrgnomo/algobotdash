@@ -122,6 +122,11 @@
             <div class="metric-card"><small>Sharpe anualizado</small><strong id="metric-sharpe-annualized" aria-describedby="reason-sharpe-annualized">—</strong><small class="metric-reason" id="reason-sharpe-annualized"></small></div>
             <div class="metric-card"><small>Sortino anualizado</small><strong id="metric-sortino-annualized" aria-describedby="reason-sortino-annualized">—</strong><small class="metric-reason" id="reason-sortino-annualized"></small></div>
           </div>
+          <h3 id="risk-title">Risco</h3>
+          <div class="metrics-grid">
+            <div class="metric-card"><small>Drawdown monetário mais profundo</small><strong id="risk-deepest">—</strong><small id="risk-deepest-detail"></small></div>
+            <div class="metric-card"><small>Drawdown monetário mais longo</small><strong id="risk-longest">—</strong><small id="risk-longest-detail"></small></div>
+          </div>
           <p id="metrics-state" aria-live="polite" hidden></p>
         </section>
         <p id="table-state" role="alert" hidden></p>
@@ -196,7 +201,7 @@
         no_losing_positions: "A amostra não contém posições perdedoras.",
         zero_standard_deviation: "Os resultados não possuem dispersão.",
         zero_downside_deviation: "A amostra não possui dispersão negativa.",
-        numeric_overflow: "A razão excede o limite numérico disponível.",
+        numeric_overflow: "O cálculo excede o limite numérico disponível.",
         invalid_opening_balance_coverage: "A cobertura do saldo de abertura ajustado é inválida.",
         realized_metrics_unavailable_for_open_status: "Métricas realizadas ficam indisponíveis para o filtro de posições abertas.",
       };
@@ -224,6 +229,7 @@
       }
 
       function renderMetrics(data) {
+        renderDrawdown(data);
         Object.entries(metricIds).forEach(([name, selector]) => {
           const element = document.querySelector(selector);
           element.textContent = formatMetric(name, data[name]);
@@ -264,6 +270,7 @@
       }
 
       function clearMetrics(message) {
+        clearDrawdown(message);
         Object.values(metricIds).forEach((selector) => {
           const element = document.querySelector(selector);
           element.textContent = "—";
@@ -277,6 +284,40 @@
         const temporalSummary = document.querySelector("#temporal-metrics-summary");
         if (temporalSummary) temporalSummary.textContent = message;
         setNotice("#metrics-state", message, true);
+      }
+
+      function clearDrawdown(message) {
+        for (const name of ["deepest", "longest"]) {
+          document.querySelector(`#risk-${name}`).textContent = "—";
+          document.querySelector(`#risk-${name}-detail`).textContent = message;
+        }
+      }
+
+      function renderDrawdown(data) {
+        const risk = data.monetary_drawdown;
+        if (!risk || risk.state !== "available") {
+          const reason = data.unavailable_reasons?.monetary_drawdown;
+          clearDrawdown(!risk ? "Drawdown não fornecido por esta versão do backend."
+            : {empty_sample: "Sem dados: a amostra não contém posições realizadas.",
+              no_drawdown: "Sem drawdown.",
+              unavailable: `Indisponível: ${metricReasonLabels[reason] || reason || "não foi possível calcular."}`}[risk.state]
+              || "Drawdown indisponível.");
+          return;
+        }
+        const dateLabel = (value) => value ? new Date(value).toLocaleString("pt-BR", {
+          timeZone: "America/Bahia",
+        }) : "—";
+        for (const name of ["deepest", "longest"]) {
+          const episode = risk[`${name}_episode`];
+          document.querySelector(`#risk-${name}`).textContent = name === "deepest"
+            ? formatMetric("depth", episode.depth) : `${episode.duration_days} dias`;
+          document.querySelector(`#risk-${name}-detail`).textContent =
+            `${name === "deepest" ? `${episode.duration_days} dias` : formatMetric("depth", episode.depth)}; `
+            + `Pico: ${dateLabel(episode.peak_at)}; Vale: ${dateLabel(episode.valley_at)}; `
+            + `Recuperação: ${dateLabel(episode.recovery_at)}`
+            + (episode.recovery_at === null ? "; Em andamento" : "")
+            + ". Datas em America/Bahia.";
+        }
       }
 
       function setNotice(id, message, visible) {

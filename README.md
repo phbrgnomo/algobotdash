@@ -66,6 +66,18 @@ Com `status=all`, as métricas usam apenas as posições realizadas e `excluded_
 
 Até a entrega do MVP, o SQLite usa um único schema corrente, sem tabela de versão ou migrações. O refresh reaproveita o histórico de importações entre projeções compatíveis. Se uma alteração estrutural tornar a tabela `imports` incompatível, apague o arquivo configurado em `ALGOBOTDASH_DATABASE` ou `--database` (`data/algobotdash.sqlite` por padrão) e execute novamente a importação; toda a projeção e seu histórico serão reconstruídos a partir do Excel.
 
+O grupo **Risco** apresenta dois cartões de drawdown monetário: episódio mais profundo
+e episódio mais longo, com profundidade negativa, duração em dias civis no fuso `America/Bahia`, pico,
+vale e recuperação. A API expõe `monetary_drawdown` com `state`, `deepest_episode` e
+`longest_episode`; cada episódio tem `depth`, `peak_at`, `valley_at`, `recovery_at` e
+`duration_days`. Timestamps são UTC; o dashboard mostra datas em `America/Bahia`.
+A curva parte de zero no início efetivo do filtro e agrega fechamentos simultâneos.
+Episódios abertos mostram “Em andamento”, mantêm recuperação nula e contam duração
+até `effective_date_to`. `no_drawdown`, `empty_sample` e `unavailable` mantêm episódios
+nulos e mensagens visíveis; o último usa `unavailable_reasons.monetary_drawdown`.
+O cálculo monetário independe da cobertura do saldo ajustado. As convenções completas
+estão em [ADR 0003](docs/adr/0003-reconstruction-and-metric-conventions.md).
+
 ### Pré-requisitos
 
 - Python 3.10 ou superior;

@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, TypeAlias
 from zoneinfo import ZoneInfo
@@ -78,6 +79,7 @@ class MetricSample:
     opening_balances: dict[date, float | None]
     global_first_closed_date: date | None
     global_last_closed_date: date | None
+    closed_events: tuple[tuple[datetime, Fraction], ...]
 
 
 @dataclass(frozen=True)
@@ -488,12 +490,15 @@ def read_metric_sample(path: Path, filters: PositionFilters) -> MetricSample:
             rows = connection.execute(query, parameters).fetchall()
             pnl_values: list[float] = []
             pnl_by_day: dict[date, list[float]] = {}
+            pnl_by_instant: dict[datetime, list[float]] = {}
             for row in rows:
                 if row["status"] == "closed":
                     pnl = _finite_number(row["pnl"], "P&L")
                     pnl_values.append(pnl)
                     closed_day = date.fromisoformat(_bahia_date(row["exit_at"]) or "")
                     pnl_by_day.setdefault(closed_day, []).append(pnl)
+                    closed_at = datetime.fromisoformat(_utc_timestamp(row["exit_at"]) or "")
+                    pnl_by_instant.setdefault(closed_at, []).append(pnl)
             excluded_open_positions = sum(row["status"] == "open" for row in rows)
             global_closed_days = [
                 date.fromisoformat(_bahia_date(row[0]) or "")
@@ -511,6 +516,10 @@ def read_metric_sample(path: Path, filters: PositionFilters) -> MetricSample:
             if not all(math.isfinite(value) for value in daily_pnl.values()):
                 raise ValueError("P&L diário não finito")
             opening_balances = _opening_balances(transaction_rows)
+            closed_events = tuple(
+                (at, sum((Fraction(str(value)) for value in values), Fraction(0)))
+                for at, values in sorted(pnl_by_instant.items())
+            )
         except (sqlite3.Error, TypeError, ValueError, OverflowError) as exc:
             raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
         return MetricSample(
@@ -520,6 +529,7 @@ def read_metric_sample(path: Path, filters: PositionFilters) -> MetricSample:
             opening_balances,
             min(global_closed_days, default=None),
             max(global_closed_days, default=None),
+            closed_events,
         )
     finally:
         connection.close()
