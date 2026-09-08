@@ -16,7 +16,7 @@ from unittest.mock import patch
 from algobotdash.metrics import _finite_ratio  # pylint: disable=protected-access
 from algobotdash.storage import SCHEMA, read_positions
 from algobotdash.web import app
-from tests.fixture_helpers import get_asgi, insert_positions
+from tests.fixture_helpers import get_asgi, insert_positions, insert_transactions
 
 
 # The integration seam intentionally covers every public read-only API behavior.
@@ -380,11 +380,8 @@ class QueryApiTests(unittest.TestCase):
                     ),
                 ],
             )
-            connection.executemany(
-                "INSERT INTO transactions("
-                "transaction_id, order_id, position_id, strategy, at, symbol_raw, direction, "
-                "volume, price, commission, tax, swap, pnl, balance, comment, import_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            insert_transactions(
+                connection,
                 [
                     (
                         "2", None, None, None, "2026-08-04T01:00:00+00:00", "", "balance",
@@ -447,11 +444,8 @@ class QueryApiTests(unittest.TestCase):
                     ),
                 ],
             )
-            connection.executemany(
-                "INSERT INTO transactions("
-                "transaction_id, order_id, position_id, strategy, at, symbol_raw, direction, "
-                "volume, price, commission, tax, swap, pnl, balance, comment, import_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            insert_transactions(
+                connection,
                 [
                     (
                         "9", None, None, None, "2026-08-03T09:00:00-03:00", "", "balance",
@@ -555,11 +549,8 @@ class QueryApiTests(unittest.TestCase):
                     ),
                 ],
             )
-            connection.executemany(
-                "INSERT INTO transactions("
-                "transaction_id, order_id, position_id, strategy, at, symbol_raw, direction, "
-                "volume, price, commission, tax, swap, pnl, balance, comment, import_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            insert_transactions(
+                connection,
                 [
                     (
                         "10", None, None, None, "2026-08-03T09:00:00-03:00", "", "balance",
@@ -612,11 +603,8 @@ class QueryApiTests(unittest.TestCase):
                     ),
                 ],
             )
-            connection.executemany(
-                "INSERT INTO transactions("
-                "transaction_id, order_id, position_id, strategy, at, symbol_raw, direction, "
-                "volume, price, commission, tax, swap, pnl, balance, comment, import_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            insert_transactions(
+                connection,
                 [
                     (
                         str(identifier), None, None, None, timestamp, "", "balance",
