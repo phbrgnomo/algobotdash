@@ -3,8 +3,13 @@
 import unittest
 from datetime import date, datetime, timezone
 from fractions import Fraction
+from typing import cast
 
-from algobotdash.metrics import calculate_monetary_drawdown, calculate_percentage_drawdown
+from algobotdash.metrics import (
+    DrawdownEpisode,
+    calculate_monetary_drawdown,
+    calculate_percentage_drawdown,
+)
 
 
 class PercentageDrawdownTests(unittest.TestCase):
@@ -33,35 +38,56 @@ class PercentageDrawdownTests(unittest.TestCase):
             "recovery_at": None, "duration_days": 7,
         })
 
-    def test_zero_and_negative_index_are_not_clamped_or_reset(self):
-        """A zero index stays zero; a negative index continues the signed product."""
-        for loss, expected in [(-100, -1.0), (-150, -1.75)]:
-            with self.subTest(loss=loss):
-                result, reason = calculate_percentage_drawdown(
-                    ((datetime(2026, 8, 3, 12, tzinfo=timezone.utc), loss),
-                     (datetime(2026, 8, 4, 12, tzinfo=timezone.utc), 50)),
-                    {date(2026, 8, 3): 100, date(2026, 8, 4): 100},
-                    period=(date(2026, 8, 3), date(2026, 8, 7)),
-                )
-                self.assertIsNone(reason)
-                episode = result["deepest_episode"]
-                assert episode is not None
-                self.assertEqual(episode["depth"], expected)
-                self.assertIsNone(episode["recovery_at"])
+    def _check_unrecovered_index(self, loss: float, expected: float) -> None:
+        """Check a two-day index path with a fixed second-day positive return."""
+        result, reason = calculate_percentage_drawdown(
+            ((datetime(2026, 8, 3, 12, tzinfo=timezone.utc), loss),
+             (datetime(2026, 8, 4, 12, tzinfo=timezone.utc), 50)),
+            {date(2026, 8, 3): 100, date(2026, 8, 4): 100},
+            period=(date(2026, 8, 3), date(2026, 8, 7)),
+        )
+        self.assertIsNone(reason)
+        self.assertIsNotNone(result["deepest_episode"])
+        episode = cast(DrawdownEpisode, result["deepest_episode"])
+        self.assertEqual(episode["depth"], expected)
+        self.assertIsNone(episode["recovery_at"])
+
+    def test_zero_index_stays_zero(self):
+        """A total loss remains unrecovered after a positive daily return."""
+        self._check_unrecovered_index(-100, -1.0)
+
+    def test_negative_index_continues_signed_product(self):
+        """A loss exceeding capital is neither clamped nor reset."""
+        self._check_unrecovered_index(-150, -1.75)
+
+    def _check_invalid_coverage(self, balance: float | None) -> None:
+        """Assert the public unavailable contract for one invalid balance."""
+        event = ((datetime.fromisoformat("2026-08-03T12:00:00+00:00"), -10),)
+        period = (date(2026, 8, 3), date(2026, 8, 3))
+        result, reason = calculate_percentage_drawdown(
+            event, {period[0]: balance}, period=period,
+        )
+        self.assertEqual(result, {
+            "state": "unavailable", "deepest_episode": None, "longest_episode": None,
+        })
+        self.assertEqual(reason, "invalid_opening_balance_coverage")
+
+    def test_missing_opening_balance_is_unavailable(self):
+        """A return cannot be calculated without its opening balance."""
+        self._check_invalid_coverage(None)
+
+    def test_zero_opening_balance_is_unavailable(self):
+        """A zero denominator is not a valid performance reference."""
+        self._check_invalid_coverage(0)
+
+    def test_negative_opening_balance_is_unavailable(self):
+        """A negative denominator is not a valid performance reference."""
+        self._check_invalid_coverage(-10)
 
     def test_coverage_states_and_single_observation(self):
         """A single valid loss needs neither two observations nor annualization."""
         event = ((datetime.fromisoformat("2026-08-03T12:00:00+00:00"), -10),)
         period = (date(2026, 8, 3), date(2026, 8, 3))
-        for balance in (None, 0, -10):
-            with self.subTest(balance=balance):
-                result, reason = calculate_percentage_drawdown(
-                    event, {period[0]: balance}, period=period,
-                )
-                self.assertEqual(result, {
-                    "state": "unavailable", "deepest_episode": None, "longest_episode": None,
-                })
-                self.assertEqual(reason, "invalid_opening_balance_coverage")
         valid, reason = calculate_percentage_drawdown(event, {period[0]: 100}, period=period)
         self.assertEqual(valid["state"], "available")
         self.assertIsNone(reason)
@@ -106,21 +132,32 @@ class PercentageDrawdownTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "timezone-aware"):
             calculate_percentage_drawdown(
-                ((datetime(2026, 8, 3), -10),), {},
+                # Deliberately invalid input: the calculation must reject a naive date.
+                ((datetime(2026, 8, 3, tzinfo=None), -10),), {},  # noqa: DTZ001
                 period=(date(2026, 8, 3), date(2026, 8, 4)),
             )
 
-    def test_nonfinite_pnl_is_unavailable(self):
-        """The public calculation contains numeric failures as well as overflow."""
-        for value in (float("nan"), float("inf"), -float("inf")):
-            with self.subTest(value=value):
-                result, reason = calculate_percentage_drawdown(
-                    ((datetime(2026, 8, 3, 12, tzinfo=timezone.utc), value),),
-                    {date(2026, 8, 3): 100},
-                    period=(date(2026, 8, 3), date(2026, 8, 3)),
-                )
-                self.assertEqual(result["state"], "unavailable")
-                self.assertEqual(reason, "numeric_overflow")
+    def _check_nonfinite_pnl(self, value: float) -> None:
+        """Assert the stable public reason for one non-finite source P&L."""
+        result, reason = calculate_percentage_drawdown(
+            ((datetime(2026, 8, 3, 12, tzinfo=timezone.utc), value),),
+            {date(2026, 8, 3): 100},
+            period=(date(2026, 8, 3), date(2026, 8, 3)),
+        )
+        self.assertEqual(result["state"], "unavailable")
+        self.assertEqual(reason, "numeric_overflow")
+
+    def test_nan_pnl_is_unavailable(self):
+        """NaN cannot become part of a linked performance index."""
+        self._check_nonfinite_pnl(float("nan"))
+
+    def test_positive_infinite_pnl_is_unavailable(self):
+        """Positive infinity cannot become part of a linked performance index."""
+        self._check_nonfinite_pnl(float("inf"))
+
+    def test_negative_infinite_pnl_is_unavailable(self):
+        """Negative infinity cannot become part of a linked performance index."""
+        self._check_nonfinite_pnl(-float("inf"))
 
     def test_deepest_selection_precedes_float_serialization(self):
         """Distinct exact depths that round to the same float are not ties."""
@@ -133,8 +170,8 @@ class PercentageDrawdownTests(unittest.TestCase):
             {date(2026, 8, day): 1 for day in (3, 4, 5)},
             period=(date(2026, 8, 3), date(2026, 8, 5)),
         )
-        episode = result["deepest_episode"]
-        assert episode is not None
+        self.assertIsNotNone(result["deepest_episode"])
+        episode = cast(DrawdownEpisode, result["deepest_episode"])
         self.assertEqual(episode["valley_at"], "2026-08-05T12:00:00Z")
 
     def test_daily_linking_uses_last_exit_and_recovers_exactly(self):
@@ -175,24 +212,42 @@ class DrawdownTests(unittest.TestCase):
                 period=(date(2026, 8, 2), date(2026, 8, 1)),
             )
 
-    def test_naive_event_timestamps_are_rejected_before_calculation(self):
-        """Reject ambiguous dates even when they would not serialize an episode."""
-        aware = datetime.fromisoformat("2026-08-01T12:00:00+00:00")
-        for naive_index in range(3):
-            with self.subTest(naive_index=naive_index):
-                events = tuple(
-                    (aware.replace(tzinfo=None) if index == naive_index else aware, pnl)
-                    for index, pnl in enumerate((10.0, -5.0, 5.0))
-                )
-                with self.assertRaisesRegex(ValueError, "timezone-aware"):
-                    calculate_monetary_drawdown(
-                        events, period=(date(2026, 8, 1), date(2026, 8, 2))
-                    )
+    def _expect_naive_monetary_timestamp_rejected(
+        self, events: tuple[tuple[datetime, float], ...],
+    ) -> None:
+        """Assert that any ambiguous event timestamp is rejected at the public seam."""
         with self.assertRaisesRegex(ValueError, "timezone-aware"):
             calculate_monetary_drawdown(
-                ((aware.replace(tzinfo=None), 10.0),),
-                period=(date(2026, 8, 1), date(2026, 8, 2)),
+                events, period=(date(2026, 8, 1), date(2026, 8, 2))
             )
+
+    def test_first_naive_event_timestamp_is_rejected(self):
+        """The first event must have an explicit timezone."""
+        aware = datetime.fromisoformat("2026-08-01T12:00:00+00:00")
+        self._expect_naive_monetary_timestamp_rejected(
+            ((aware.replace(tzinfo=None), 10.0), (aware, -5.0), (aware, 5.0))
+        )
+
+    def test_middle_naive_event_timestamp_is_rejected(self):
+        """The middle event must have an explicit timezone."""
+        aware = datetime.fromisoformat("2026-08-01T12:00:00+00:00")
+        self._expect_naive_monetary_timestamp_rejected(
+            ((aware, 10.0), (aware.replace(tzinfo=None), -5.0), (aware, 5.0))
+        )
+
+    def test_last_naive_event_timestamp_is_rejected(self):
+        """The final event must have an explicit timezone."""
+        aware = datetime.fromisoformat("2026-08-01T12:00:00+00:00")
+        self._expect_naive_monetary_timestamp_rejected(
+            ((aware, 10.0), (aware, -5.0), (aware.replace(tzinfo=None), 5.0))
+        )
+
+    def test_only_naive_event_timestamp_is_rejected(self):
+        """A single ambiguous event cannot be used to form an episode."""
+        aware = datetime.fromisoformat("2026-08-01T12:00:00+00:00")
+        self._expect_naive_monetary_timestamp_rejected(
+            ((aware.replace(tzinfo=None), 10.0),)
+        )
 
     def test_equal_valleys_and_equal_episodes_keep_first_occurrence(self):
         """Repeated minima and equal selectors preserve chronological precedence."""
@@ -221,8 +276,8 @@ class DrawdownTests(unittest.TestCase):
                 ("2026-08-02T03:00:00+00:00", -5),
                 ("2026-08-02T03:01:00+00:00", 5),
             ]), period=(date(2026, 8, 1), date(2026, 8, 2)))
-        episode = result["deepest_episode"]
-        assert isinstance(episode, dict)
+        self.assertIsNotNone(result["deepest_episode"])
+        episode = cast(DrawdownEpisode, result["deepest_episode"])
         self.assertEqual(episode.get("duration_days"), 1)
 
     def test_numeric_overflow_does_not_publish_partial_episodes(self):
@@ -243,9 +298,8 @@ class DrawdownTests(unittest.TestCase):
                 ("2026-08-02T12:00:00+00:00", -0.2),
                 ("2026-08-03T12:00:00+00:00", 0.3),
             ]), period=(date(2026, 8, 1), date(2026, 8, 7)))
-        episode = result["deepest_episode"]
-        self.assertIsNotNone(episode)
-        assert isinstance(episode, dict)
+        self.assertIsNotNone(result["deepest_episode"])
+        episode = cast(DrawdownEpisode, result["deepest_episode"])
         self.assertEqual(episode.get("recovery_at"), "2026-08-03T12:00:00Z")
         self.assertEqual(episode.get("depth"), -0.3)
 
