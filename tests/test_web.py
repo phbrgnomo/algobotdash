@@ -61,6 +61,21 @@ class WebTests(unittest.TestCase):
         with self._paths():
             return health()
 
+    def _open_valid_projection(self) -> sqlite3.Connection:
+        """Create a current-schema projection after preparing valid configuration."""
+        self._write_config()
+        connection = sqlite3.connect(self.data_dir / "algobotdash.sqlite")
+        connection.executescript(SCHEMA)
+        return connection
+
+    def _commit_projection_and_read_health(
+        self, connection: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        """Publish a fixture projection before reading its public health state."""
+        connection.commit()
+        connection.close()
+        return self._health_payload()
+
     def test_dashboard_serves_own_static_page(self) -> None:
         """Dashboard should serve its own static HTML page."""
         response = dashboard()
@@ -683,34 +698,22 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
     def test_health_rejects_projection_with_previous_table_shape(self) -> None:
         """Health should validate the complete current schema, not only imports."""
-        self._write_config()
-        database_path = self.data_dir / "algobotdash.sqlite"
-        connection = sqlite3.connect(database_path)
-        connection.executescript(SCHEMA)
+        connection = self._open_valid_projection()
         connection.execute("DROP TABLE transactions")
         connection.execute("CREATE TABLE transactions (id INTEGER PRIMARY KEY)")
-        connection.commit()
-        connection.close()
-
-        payload = self._health_payload()
+        payload = self._commit_projection_and_read_health(connection)
 
         self.assertEqual(payload["projection"], "invalid")
         self.assertEqual(payload["status"], "error")
 
     def test_health_reports_valid_projection_and_last_import(self) -> None:
         """Health should expose the latest successful import timestamp."""
-        self._write_config()
-        database_path = self.data_dir / "algobotdash.sqlite"
-        connection = sqlite3.connect(database_path)
-        connection.executescript(SCHEMA)
+        connection = self._open_valid_projection()
         connection.execute(
             "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (1, "ReportHistory.xlsx", "hash", "2026-08-31T10:00:00+00:00", 1, 1, 0, 0),
         )
-        connection.commit()
-        connection.close()
-
-        payload = self._health_payload()
+        payload = self._commit_projection_and_read_health(connection)
 
         self.assertEqual(payload["projection"], "available")
         self.assertEqual(payload["last_imported_at"], "2026-08-31T10:00:00+00:00")
