@@ -78,6 +78,20 @@ nulos e mensagens visíveis; o último usa `unavailable_reasons.monetary_drawdow
 O cálculo monetário independe da cobertura do saldo ajustado. As convenções completas
 estão em [ADR 0003](docs/adr/0003-reconstruction-and-metric-conventions.md).
 
+O grupo Risco também apresenta os episódios percentuais mais profundo e mais longo.
+`percentage_drawdown` usa o mesmo contrato, com `depth` em fração negativa (`-0.25`
+significa `-25,00%`). O índice interno começa em 100 e encadeia os retornos diários
+filtrados sobre o saldo global de abertura ajustado. Cada retorno é aplicado no último
+fechamento selecionado daquele dia em Bahia; dias úteis sem fechamentos não alteram
+o índice, e fins de semana são excluídos. Soma diária e encadeamento usam frações exatas
+sobre os valores decimais projetados, sem arredondamento intermediário.
+Perdas superiores a 100% não são limitadas: o índice pode ficar negativo; ao chegar
+exatamente a zero, permanece zero sob o encadeamento. Cobertura inválida torna apenas
+o percentual indisponível, com motivo em `unavailable_reasons.percentage_drawdown`.
+O percentual não exige a amostra mínima de Sharpe/Sortino. Os quatro cartões usam
+a mesma resposta de filtros e descartam respostas antigas; um backend sem o novo
+campo mantém os cartões monetários e informa a ausência nos percentuais.
+
 ### Pré-requisitos
 
 - Python 3.10 ou superior;

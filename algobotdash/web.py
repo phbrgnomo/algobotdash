@@ -15,6 +15,7 @@ from .config import ConfigurationError, load_config
 from .environment import load_environment
 from .metrics import (
     calculate_monetary_drawdown,
+    calculate_percentage_drawdown,
     calculate_position_metrics,
     calculate_temporal_metrics,
     effective_metric_period,
@@ -274,13 +275,13 @@ async def metrics_endpoint(
         payload.update(temporal)
         position_reasons = cast(dict[str, str], payload["unavailable_reasons"])
         position_reasons.update(temporal_reasons)
+        period = effective_metric_period(
+            sample.daily_pnl, date_from=date_from, date_to=date_to,
+            global_first_closed_date=sample.global_first_closed_date,
+            global_last_closed_date=sample.global_last_closed_date,
+        )
         drawdown = calculate_monetary_drawdown(
-            sample.closed_events,
-            period=effective_metric_period(
-                sample.daily_pnl, date_from=date_from, date_to=date_to,
-                global_first_closed_date=sample.global_first_closed_date,
-                global_last_closed_date=sample.global_last_closed_date,
-            ),
+            sample.closed_events, period=period,
             realized_available=status != "open",
         )
         payload["monetary_drawdown"] = drawdown
@@ -289,6 +290,13 @@ async def metrics_endpoint(
                 "realized_metrics_unavailable_for_open_status"
                 if status == "open" else "numeric_overflow"
             )
+        percentage, percentage_reason = calculate_percentage_drawdown(
+            sample.closed_events, sample.opening_balances,
+            period=period, realized_available=status != "open",
+        )
+        payload["percentage_drawdown"] = percentage
+        if percentage_reason is not None:
+            position_reasons["percentage_drawdown"] = percentage_reason
         return payload
     except OverflowError as exc:
         raise _projection_error(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from fractions import Fraction
@@ -24,12 +24,15 @@ class DrawdownEpisode(TypedDict):
     duration_days: int
 
 
-class MonetaryDrawdown(TypedDict):
-    """Monetary risk state; absent episodes are never fabricated."""
+class Drawdown(TypedDict):
+    """Shared risk state; depth units are defined by the enclosing metric."""
 
     state: str
     deepest_episode: DrawdownEpisode | None
     longest_episode: DrawdownEpisode | None
+
+
+MonetaryDrawdown = Drawdown
 
 
 def _utc_iso(at: datetime) -> str:
@@ -80,26 +83,46 @@ def _monetary_depths(
 
 def _monetary_episodes(
     events: Sequence[tuple[datetime, float | Fraction]], period: tuple[date, date],
-) -> list[DrawdownEpisode]:
+) -> list[tuple[Fraction, DrawdownEpisode]]:
     """Collect recovered episodes and finalize any open episode at the period end."""
-    episodes: list[DrawdownEpisode] = []
+    return _drawdown_episodes(_monetary_depths(events, period[0]), period[1])
+
+
+def _drawdown_episodes(
+    depths: Iterable[tuple[datetime, datetime, Fraction]], end: date,
+) -> list[tuple[Fraction, DrawdownEpisode]]:
+    """Collect episodes from exact depths shared by both risk measures."""
+    episodes: list[tuple[Fraction, DrawdownEpisode]] = []
     valley: _DrawdownValley | None = None
-    for at, peak_at, depth in _monetary_depths(events, period[0]):
+    for at, peak_at, depth in depths:
         if depth < 0:
             if valley is None:
                 valley = _DrawdownValley(peak_at, at, depth)
             valley.observe(at, depth)
         elif valley is not None:
-            episodes.append(valley.serialize(at.astimezone(METRIC_TIMEZONE).date(), at))
+            episodes.append((
+                valley.depth, valley.serialize(at.astimezone(METRIC_TIMEZONE).date(), at),
+            ))
             valley = None
     if valley is not None:
-        episodes.append(valley.serialize(period[1]))
+        episodes.append((valley.depth, valley.serialize(end)))
     return episodes
 
 
 def _empty_drawdown(state: str) -> MonetaryDrawdown:
     """Represent absent or unavailable episodes without fabricated selectors."""
     return {"state": state, "deepest_episode": None, "longest_episode": None}
+
+
+def _select_drawdown(episodes: Sequence[tuple[Fraction, DrawdownEpisode]]) -> Drawdown:
+    """Compare exact depths, retaining chronological precedence for real ties."""
+    if not episodes:
+        return _empty_drawdown("no_drawdown")
+    return {
+        "state": "available",
+        "deepest_episode": min(episodes, key=lambda item: item[0])[1],
+        "longest_episode": max(episodes, key=lambda item: item[1]["duration_days"])[1],
+    }
 
 
 def calculate_monetary_drawdown(
@@ -122,13 +145,72 @@ def calculate_monetary_drawdown(
         episodes = _monetary_episodes(events, period)
     except (OverflowError, ValueError):
         return _empty_drawdown("unavailable")
-    if not episodes:
-        return _empty_drawdown("no_drawdown")
-    return {
-        "state": "available",
-        "deepest_episode": min(episodes, key=lambda item: item["depth"]),
-        "longest_episode": max(episodes, key=lambda item: item["duration_days"]),
-    }
+    return _select_drawdown(episodes)
+
+
+def _percentage_depths(
+    daily_events: Mapping[date, tuple[datetime, Fraction]],
+    opening_balances: Mapping[date, float | None], start: date,
+) -> Iterator[tuple[datetime, datetime, Fraction]]:
+    """Link exact daily returns against a positive, initially 100, high-water mark."""
+    peak_at = datetime.combine(start, time.min, METRIC_TIMEZONE)
+    peak = index = Fraction(100)
+    for day, (at, pnl) in sorted(daily_events.items()):
+        balance = opening_balances[day]
+        if balance is None:
+            raise ValueError("missing opening balance")
+        daily_return = pnl / Fraction(str(balance))
+        index *= 1 + daily_return
+        depth = index / peak - 1
+        if not all(math.isfinite(float(value)) for value in (daily_return, index, depth)):
+            raise OverflowError("non-finite percentage drawdown")
+        yield at, peak_at, depth
+        if index > peak:
+            peak, peak_at = index, at
+
+
+def _daily_closed_events(
+    events: Sequence[tuple[datetime, float | Fraction]], period: tuple[date, date],
+) -> dict[date, tuple[datetime, Fraction]]:
+    """Aggregate exact weekday P&L and retain each day's last selected exit."""
+    daily_events: dict[date, tuple[datetime, Fraction]] = {}
+    for at, pnl in events:
+        at = at.astimezone(timezone.utc)
+        day = at.astimezone(METRIC_TIMEZONE).date()
+        if day.weekday() < 5 and period[0] <= day <= period[1]:
+            previous_at, previous_pnl = daily_events.get(day, (at, Fraction(0)))
+            daily_events[day] = (max(at, previous_at), previous_pnl + Fraction(str(pnl)))
+    return daily_events
+
+
+def calculate_percentage_drawdown(
+    events: Sequence[tuple[datetime, float | Fraction]],
+    opening_balances: Mapping[date, float | None],
+    *,
+    period: tuple[date, date] | None,
+    realized_available: bool = True,
+) -> tuple[Drawdown, str | None]:
+    """Return daily percentage episodes and an optional unavailability reason."""
+    if not realized_available:
+        return _empty_drawdown("unavailable"), "realized_metrics_unavailable_for_open_status"
+    if period is None or not events:
+        return _empty_drawdown("empty_sample"), None
+    if period[1] < period[0]:
+        raise ValueError("period end must not precede period start")
+    for at, _ in events:
+        if at.tzinfo is None or at.utcoffset() is None:
+            raise ValueError("episode timestamps must be timezone-aware")
+    try:
+        daily_events = _daily_closed_events(events, period)
+        if any(opening_balances.get(day) is None or (opening_balances[day] or 0) <= 0
+               for day in daily_events):
+            return _empty_drawdown("unavailable"), "invalid_opening_balance_coverage"
+        episodes = _drawdown_episodes(
+            _percentage_depths(daily_events, opening_balances, period[0]), period[1],
+        )
+    except (OverflowError, ValueError):
+        return _empty_drawdown("unavailable"), "numeric_overflow"
+    return _select_drawdown(episodes), None
 
 METRIC_NAMES = (
     "net_pnl",

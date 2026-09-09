@@ -95,6 +95,106 @@ class QueryApiTests(unittest.TestCase):
         with self._paths():
             return get_asgi(app, path)
 
+    def _seed_percentage_projection(self):
+        """Seed a two-day filtered loss and exact recovery with global capital."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES "
+                "(1, 'fixture', 'hash', '2026-08-10T12:00:00Z', 3, 3, 0, 0)"
+            )
+            insert_positions(connection, [
+                (str(index), "Turtle", "WIN", "WINQ26", "buy",
+                 "2026-08-03T10:00:00Z", at, "closed", 1, 1, 100, 110,
+                 0, 0, pnl, 1, 1)
+                for index, (at, pnl) in enumerate([
+                    ("2026-08-03T12:00:00Z", -10),
+                    ("2026-08-03T17:00:00Z", -20),
+                    ("2026-08-04T15:00:00Z", 30),
+                ])
+            ])
+            insert_transactions(connection, [
+                ("1", None, None, None, "2026-08-03T09:00:00Z", "", "balance",
+                 None, None, 0, 0, 0, 9999, 100, "Ajuste de Saldo", 1),
+                ("2", None, None, None, "2026-08-04T09:00:00Z", "", "balance",
+                 None, None, 0, 0, 0, -8888, 70, "Ajuste de Saldo", 1),
+            ])
+
+    def test_percentage_drawdown_links_adjusted_daily_returns(self):
+        """Global adjustments supply capital, never percentage performance."""
+        self._seed_percentage_projection()
+        response = self._request("/api/metrics")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["percentage_drawdown"]["deepest_episode"], {
+            "depth": -0.3, "peak_at": "2026-08-03T03:00:00Z",
+            "valley_at": "2026-08-03T17:00:00Z",
+            "recovery_at": "2026-08-04T15:00:00Z", "duration_days": 1,
+        })
+        self.assertNotIn("percentage_drawdown", payload["unavailable_reasons"])
+
+    def test_percentage_coverage_failure_keeps_monetary_episode(self):
+        """Missing global capital only makes the percentage contract unavailable."""
+        self._seed_percentage_projection()
+        before = self._request("/api/metrics").json()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("DELETE FROM transactions WHERE transaction_id = '2'")
+        after = self._request("/api/metrics").json()
+        self.assertEqual(after["monetary_drawdown"], before["monetary_drawdown"])
+        self.assertEqual(after["percentage_drawdown"], {
+            "state": "unavailable", "deepest_episode": None, "longest_episode": None,
+        })
+        self.assertEqual(after["unavailable_reasons"]["percentage_drawdown"],
+                         "invalid_opening_balance_coverage")
+
+    def test_percentage_loss_beyond_total_capital_is_unrecovered(self):
+        """A -150% day publishes -1.5 and respects an explicit open duration end."""
+        self._seed_percentage_projection()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("UPDATE positions SET pnl = -130 WHERE position_id = '0'")
+        response = self._request("/api/metrics?date_to=2026-08-03")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["percentage_drawdown"]["deepest_episode"], {
+            "depth": -1.5, "peak_at": "2026-08-03T03:00:00Z",
+            "valley_at": "2026-08-03T17:00:00Z", "recovery_at": None,
+            "duration_days": 0,
+        })
+
+    def test_percentage_filters_and_empty_status_contract(self):
+        """Risk uses selected exits and remains available for a single daily return."""
+        self._seed_percentage_projection()
+        filtered = self._request(
+            "/api/metrics?strategy=Turtle&symbol_family=WIN&direction=buy"
+            "&association=associated&date_to=2026-08-03&status=all"
+        ).json()
+        self.assertEqual(filtered["percentage_drawdown"]["state"], "available")
+        self.assertIsNone(filtered["sharpe_daily"])
+        for query in ("strategy=Missing", "symbol_family=WDO", "direction=sell",
+                      "association=unassociated"):
+            with self.subTest(query=query):
+                empty = self._request(
+                    f"/api/metrics?{query}&date_from=2026-08-03&date_to=2026-08-07"
+                ).json()
+                self.assertEqual(empty["percentage_drawdown"]["state"], "empty_sample")
+        opened = self._request("/api/metrics?status=open").json()
+        self.assertEqual(opened["percentage_drawdown"]["state"], "unavailable")
+        self.assertEqual(opened["unavailable_reasons"]["percentage_drawdown"],
+                         "realized_metrics_unavailable_for_open_status")
+        winning = self._request("/api/metrics?date_from=2026-08-04").json()
+        self.assertEqual(winning["percentage_drawdown"]["state"], "no_drawdown")
+
+    def test_percentage_product_overflow_is_isolated_from_other_metrics(self):
+        """Finite daily returns can overflow their linked index without failing HTTP."""
+        self._seed_percentage_projection()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("UPDATE positions SET pnl = 1e200")
+        response = self._request("/api/metrics")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["percentage_drawdown"]["state"], "unavailable")
+        self.assertEqual(payload["unavailable_reasons"]["percentage_drawdown"], "numeric_overflow")
+        self.assertEqual(payload["monetary_drawdown"]["state"], "no_drawdown")
+        self.assertIsNotNone(payload["sharpe_daily"])
+
     def test_monetary_drawdown_states_and_shared_filters(self):
         """Risk follows shared filters and distinguishes absent and unavailable data."""
         self._seed_projection()
@@ -339,6 +439,7 @@ class QueryApiTests(unittest.TestCase):
             payload["unavailable_reasons"],
             dict.fromkeys(
                 (
+                    "percentage_drawdown",
                     "sharpe_daily",
                     "sortino_daily",
                     "sharpe_annualized",
