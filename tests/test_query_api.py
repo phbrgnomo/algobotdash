@@ -159,6 +159,30 @@ class QueryApiTests(unittest.TestCase):
             "duration_days": 0,
         })
 
+    def _assert_percentage_empty_for_filter(self, query: str) -> None:
+        """Assert that one shared filter removes the percentage risk sample."""
+        self._seed_percentage_projection()
+        payload = self._request(
+            f"/api/metrics?{query}&date_from=2026-08-03&date_to=2026-08-07"
+        ).json()
+        self.assertEqual(payload["percentage_drawdown"]["state"], "empty_sample")
+
+    def test_percentage_strategy_filter_can_empty_sample(self):
+        """A non-observed strategy has no daily return to link."""
+        self._assert_percentage_empty_for_filter("strategy=Missing")
+
+    def test_percentage_symbol_filter_can_empty_sample(self):
+        """A non-observed symbol family has no daily return to link."""
+        self._assert_percentage_empty_for_filter("symbol_family=WDO")
+
+    def test_percentage_direction_filter_can_empty_sample(self):
+        """The opposite direction has no daily return to link."""
+        self._assert_percentage_empty_for_filter("direction=sell")
+
+    def test_percentage_association_filter_can_empty_sample(self):
+        """Unassociated records have no selected daily return in this fixture."""
+        self._assert_percentage_empty_for_filter("association=unassociated")
+
     def test_percentage_filters_and_empty_status_contract(self):
         """Risk uses selected exits and remains available for a single daily return."""
         self._seed_percentage_projection()
@@ -168,13 +192,6 @@ class QueryApiTests(unittest.TestCase):
         ).json()
         self.assertEqual(filtered["percentage_drawdown"]["state"], "available")
         self.assertIsNone(filtered["sharpe_daily"])
-        for query in ("strategy=Missing", "symbol_family=WDO", "direction=sell",
-                      "association=unassociated"):
-            with self.subTest(query=query):
-                empty = self._request(
-                    f"/api/metrics?{query}&date_from=2026-08-03&date_to=2026-08-07"
-                ).json()
-                self.assertEqual(empty["percentage_drawdown"]["state"], "empty_sample")
         opened = self._request("/api/metrics?status=open").json()
         self.assertEqual(opened["percentage_drawdown"]["state"], "unavailable")
         self.assertEqual(opened["unavailable_reasons"]["percentage_drawdown"],
