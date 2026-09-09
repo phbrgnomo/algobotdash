@@ -11,7 +11,10 @@ import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
+
+import httpx
 
 from algobotdash.metrics import _finite_ratio  # pylint: disable=protected-access
 from algobotdash.storage import SCHEMA, read_positions
@@ -57,6 +60,16 @@ class QueryApiTests(unittest.TestCase):
             CONFIG_PATH=self.config_path,
             DATABASE_PATH=self.database_path,
         )
+
+    def _assert_metric_counts(
+        self, response: httpx.Response, *, sample_size: int, excluded_open_positions: int,
+    ) -> dict[str, Any]:
+        """Read one metrics response after checking its shared count contract."""
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["sample_size"], sample_size)
+        self.assertEqual(payload["excluded_open_positions"], excluded_open_positions)
+        return payload
 
     def test_monetary_episodes_use_aggregated_instants_and_filter_end(self):
         """Select distinct episodes after aggregating offset-equivalent exits."""
@@ -898,22 +911,22 @@ class QueryApiTests(unittest.TestCase):
         all_positions = self._request("/api/metrics?status=all")
         open_positions = self._request("/api/metrics?status=open")
 
-        self.assertEqual(all_positions.status_code, 200)
-        self.assertEqual(all_positions.json()["sample_size"], 2)
-        self.assertEqual(all_positions.json()["excluded_open_positions"], 1)
-        self.assertEqual(all_positions.json()["net_pnl"], -12)
-        self.assertEqual(open_positions.status_code, 200)
-        self.assertEqual(open_positions.json()["sample_size"], 0)
-        self.assertEqual(open_positions.json()["excluded_open_positions"], 1)
+        all_payload = self._assert_metric_counts(
+            all_positions, sample_size=2, excluded_open_positions=1,
+        )
+        open_payload = self._assert_metric_counts(
+            open_positions, sample_size=0, excluded_open_positions=1,
+        )
+        self.assertEqual(all_payload["net_pnl"], -12)
         for metric in (
             "net_pnl", "gross_profit", "gross_loss", "winning_trades", "losing_trades",
             "win_rate", "profit_factor", "payoff", "expectancy",
             "sharpe_per_position", "sortino_per_position",
         ):
             with self.subTest(metric=metric):
-                self.assertIsNone(open_positions.json()[metric])
+                self.assertIsNone(open_payload[metric])
                 self.assertEqual(
-                    open_positions.json()["unavailable_reasons"][metric],
+                    open_payload["unavailable_reasons"][metric],
                     "realized_metrics_unavailable_for_open_status",
                 )
 
