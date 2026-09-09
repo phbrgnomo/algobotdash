@@ -61,6 +61,12 @@ class WebTests(unittest.TestCase):
         with self._paths():
             return health()
 
+    def _health_payload_with(self, **expected: str) -> dict[str, Any]:
+        """Read health state and check the named fields shared by a fixture."""
+        payload = self._health_payload()
+        self.assertEqual({field: payload[field] for field in expected}, expected)
+        return payload
+
     def _open_valid_projection(self) -> sqlite3.Connection:
         """Create a current-schema projection after preparing valid configuration."""
         self._write_config()
@@ -655,10 +661,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
     def test_health_distinguishes_missing_configuration_source_and_projection(self) -> None:
         """Health should distinguish an absent configuration from other states."""
-        payload = self._health_payload()
-
-        self.assertEqual(payload["status"], "error")
-        self.assertEqual(payload["version"], "0.1.0")
+        payload = self._health_payload_with(status="error", version="0.1.0")
         self.assertEqual(payload["configuration"], "invalid")
         self.assertEqual(payload["source"], "unknown")
         self.assertEqual(payload["projection"], "unavailable")
@@ -669,20 +672,14 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
         self._write_config()
         (self.source_dir / "ReportHistory.xlsx").write_bytes(b"fixture")
 
-        payload = self._health_payload()
-
-        self.assertEqual(payload["configuration"], "valid")
-        self.assertEqual(payload["source"], "available")
+        payload = self._health_payload_with(configuration="valid", source="available")
         self.assertEqual(payload["projection"], "unavailable")
 
     def test_health_reports_valid_configuration_with_missing_source(self) -> None:
         """Health should report a valid configuration and missing source."""
         self._write_config()
 
-        payload = self._health_payload()
-
-        self.assertEqual(payload["configuration"], "valid")
-        self.assertEqual(payload["source"], "missing")
+        payload = self._health_payload_with(configuration="valid", source="missing")
         self.assertEqual(payload["status"], "error")
 
     def test_health_reports_invalid_projection_when_database_is_unreadable(self) -> None:
@@ -691,10 +688,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
         database_path = self.data_dir / "algobotdash.sqlite"
         database_path.write_bytes(b"projection")
 
-        payload = self._health_payload()
-
-        self.assertEqual(payload["projection"], "invalid")
-        self.assertEqual(payload["status"], "error")
+        self._health_payload_with(projection="invalid", status="error")
 
     def test_health_rejects_projection_with_previous_table_shape(self) -> None:
         """Health should validate the complete current schema, not only imports."""
