@@ -126,6 +126,8 @@
           <div class="metrics-grid">
             <div class="metric-card"><small>Drawdown monetário mais profundo</small><strong id="risk-deepest">—</strong><small id="risk-deepest-detail"></small></div>
             <div class="metric-card"><small>Drawdown monetário mais longo</small><strong id="risk-longest">—</strong><small id="risk-longest-detail"></small></div>
+            <div class="metric-card"><small>Drawdown percentual mais profundo</small><strong id="risk-percentage-deepest">—</strong><small id="risk-percentage-deepest-detail"></small></div>
+            <div class="metric-card"><small>Drawdown percentual mais longo</small><strong id="risk-percentage-longest">—</strong><small id="risk-percentage-longest-detail"></small></div>
           </div>
           <p id="metrics-state" aria-live="polite" hidden></p>
         </section>
@@ -217,7 +219,7 @@
         if (["sample_size", "winning_trades", "losing_trades"].includes(name)) {
           return new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 0}).format(value);
         }
-        if (name === "win_rate") {
+        if (["win_rate", "percentage_depth"].includes(name)) {
           return new Intl.NumberFormat("pt-BR", {style: "percent", minimumFractionDigits: 2,
             maximumFractionDigits: 2}).format(value);
         }
@@ -287,17 +289,27 @@
       }
 
       function clearDrawdown(message) {
+        clearDrawdownCards("risk", message);
+        clearDrawdownCards("risk-percentage", message);
+      }
+
+      function clearDrawdownCards(prefix, message) {
         for (const name of ["deepest", "longest"]) {
-          document.querySelector(`#risk-${name}`).textContent = "—";
-          document.querySelector(`#risk-${name}-detail`).textContent = message;
+          document.querySelector(`#${prefix}-${name}`).textContent = "—";
+          document.querySelector(`#${prefix}-${name}-detail`).textContent = message;
         }
       }
 
       function renderDrawdown(data) {
-        const risk = data.monetary_drawdown;
+        renderDrawdownCards(data, "monetary_drawdown", "risk", "depth");
+        renderDrawdownCards(data, "percentage_drawdown", "risk-percentage", "percentage_depth");
+      }
+
+      function renderDrawdownCards(data, field, prefix, depthFormat) {
+        const risk = data[field];
         if (!risk || risk.state !== "available") {
-          const reason = data.unavailable_reasons?.monetary_drawdown;
-          clearDrawdown(!risk ? "Drawdown não fornecido por esta versão do backend."
+          const reason = data.unavailable_reasons?.[field];
+          clearDrawdownCards(prefix, !risk ? "Drawdown não fornecido por esta versão do backend."
             : {empty_sample: "Sem dados: a amostra não contém posições realizadas.",
               no_drawdown: "Sem drawdown.",
               unavailable: `Indisponível: ${metricReasonLabels[reason] || reason || "não foi possível calcular."}`}[risk.state]
@@ -309,10 +321,10 @@
         }) : "—";
         for (const name of ["deepest", "longest"]) {
           const episode = risk[`${name}_episode`];
-          document.querySelector(`#risk-${name}`).textContent = name === "deepest"
-            ? formatMetric("depth", episode.depth) : `${episode.duration_days} dias`;
-          document.querySelector(`#risk-${name}-detail`).textContent =
-            `${name === "deepest" ? `${episode.duration_days} dias` : formatMetric("depth", episode.depth)}; `
+          document.querySelector(`#${prefix}-${name}`).textContent = name === "deepest"
+            ? formatMetric(depthFormat, episode.depth) : `${episode.duration_days} dias`;
+          document.querySelector(`#${prefix}-${name}-detail`).textContent =
+            `${name === "deepest" ? `${episode.duration_days} dias` : formatMetric(depthFormat, episode.depth)}; `
             + `Pico: ${dateLabel(episode.peak_at)}; Vale: ${dateLabel(episode.valley_at)}; `
             + `Recuperação: ${dateLabel(episode.recovery_at)}`
             + (episode.recovery_at === null ? "; Em andamento" : "")

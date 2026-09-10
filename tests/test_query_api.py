@@ -11,7 +11,10 @@ import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
+
+import httpx
 
 from algobotdash.metrics import _finite_ratio  # pylint: disable=protected-access
 from algobotdash.storage import SCHEMA, read_positions
@@ -58,6 +61,16 @@ class QueryApiTests(unittest.TestCase):
             DATABASE_PATH=self.database_path,
         )
 
+    def _assert_metric_counts(
+        self, response: httpx.Response, *, sample_size: int, excluded_open_positions: int,
+    ) -> dict[str, Any]:
+        """Read one metrics response after checking its shared count contract."""
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["sample_size"], sample_size)
+        self.assertEqual(payload["excluded_open_positions"], excluded_open_positions)
+        return payload
+
     def test_monetary_episodes_use_aggregated_instants_and_filter_end(self):
         """Select distinct episodes after aggregating offset-equivalent exits."""
         with self._projection() as connection:
@@ -94,6 +107,123 @@ class QueryApiTests(unittest.TestCase):
     def _request(self, path: str):
         with self._paths():
             return get_asgi(app, path)
+
+    def _seed_percentage_projection(self):
+        """Seed a two-day filtered loss and exact recovery with global capital."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES "
+                "(1, 'fixture', 'hash', '2026-08-10T12:00:00Z', 3, 3, 0, 0)"
+            )
+            insert_positions(connection, [
+                (str(index), "Turtle", "WIN", "WINQ26", "buy",
+                 "2026-08-03T10:00:00Z", at, "closed", 1, 1, 100, 110,
+                 0, 0, pnl, 1, 1)
+                for index, (at, pnl) in enumerate([
+                    ("2026-08-03T12:00:00Z", -10),
+                    ("2026-08-03T17:00:00Z", -20),
+                    ("2026-08-04T15:00:00Z", 30),
+                ])
+            ])
+            insert_transactions(connection, [
+                ("1", None, None, None, "2026-08-03T09:00:00Z", "", "balance",
+                 None, None, 0, 0, 0, 9999, 100, "Ajuste de Saldo", 1),
+                ("2", None, None, None, "2026-08-04T09:00:00Z", "", "balance",
+                 None, None, 0, 0, 0, -8888, 70, "Ajuste de Saldo", 1),
+            ])
+
+    def test_percentage_drawdown_links_adjusted_daily_returns(self):
+        """Global adjustments supply capital, never percentage performance."""
+        self._seed_percentage_projection()
+        response = self._request("/api/metrics")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["percentage_drawdown"]["deepest_episode"], {
+            "depth": -0.3, "peak_at": "2026-08-03T03:00:00Z",
+            "valley_at": "2026-08-03T17:00:00Z",
+            "recovery_at": "2026-08-04T15:00:00Z", "duration_days": 1,
+        })
+        self.assertNotIn("percentage_drawdown", payload["unavailable_reasons"])
+
+    def test_percentage_coverage_failure_keeps_monetary_episode(self):
+        """Missing global capital only makes the percentage contract unavailable."""
+        self._seed_percentage_projection()
+        before = self._request("/api/metrics").json()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("DELETE FROM transactions WHERE transaction_id = '2'")
+        after = self._request("/api/metrics").json()
+        self.assertEqual(after["monetary_drawdown"], before["monetary_drawdown"])
+        self.assertEqual(after["percentage_drawdown"], {
+            "state": "unavailable", "deepest_episode": None, "longest_episode": None,
+        })
+        self.assertEqual(after["unavailable_reasons"]["percentage_drawdown"],
+                         "invalid_opening_balance_coverage")
+
+    def test_percentage_loss_beyond_total_capital_is_unrecovered(self):
+        """A -150% day publishes -1.5 and respects an explicit open duration end."""
+        self._seed_percentage_projection()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("UPDATE positions SET pnl = -130 WHERE position_id = '0'")
+        response = self._request("/api/metrics?date_to=2026-08-03")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["percentage_drawdown"]["deepest_episode"], {
+            "depth": -1.5, "peak_at": "2026-08-03T03:00:00Z",
+            "valley_at": "2026-08-03T17:00:00Z", "recovery_at": None,
+            "duration_days": 0,
+        })
+
+    def _assert_percentage_empty_for_filter(self, query: str) -> None:
+        """Assert that one shared filter removes the percentage risk sample."""
+        self._seed_percentage_projection()
+        payload = self._request(
+            f"/api/metrics?{query}&date_from=2026-08-03&date_to=2026-08-07"
+        ).json()
+        self.assertEqual(payload["percentage_drawdown"]["state"], "empty_sample")
+
+    def test_percentage_strategy_filter_can_empty_sample(self):
+        """A non-observed strategy has no daily return to link."""
+        self._assert_percentage_empty_for_filter("strategy=Missing")
+
+    def test_percentage_symbol_filter_can_empty_sample(self):
+        """A non-observed symbol family has no daily return to link."""
+        self._assert_percentage_empty_for_filter("symbol_family=WDO")
+
+    def test_percentage_direction_filter_can_empty_sample(self):
+        """The opposite direction has no daily return to link."""
+        self._assert_percentage_empty_for_filter("direction=sell")
+
+    def test_percentage_association_filter_can_empty_sample(self):
+        """Unassociated records have no selected daily return in this fixture."""
+        self._assert_percentage_empty_for_filter("association=unassociated")
+
+    def test_percentage_filters_and_empty_status_contract(self):
+        """Risk uses selected exits and remains available for a single daily return."""
+        self._seed_percentage_projection()
+        filtered = self._request(
+            "/api/metrics?strategy=Turtle&symbol_family=WIN&direction=buy"
+            "&association=associated&date_to=2026-08-03&status=all"
+        ).json()
+        self.assertEqual(filtered["percentage_drawdown"]["state"], "available")
+        self.assertIsNone(filtered["sharpe_daily"])
+        opened = self._request("/api/metrics?status=open").json()
+        self.assertEqual(opened["percentage_drawdown"]["state"], "unavailable")
+        self.assertEqual(opened["unavailable_reasons"]["percentage_drawdown"],
+                         "realized_metrics_unavailable_for_open_status")
+        winning = self._request("/api/metrics?date_from=2026-08-04").json()
+        self.assertEqual(winning["percentage_drawdown"]["state"], "no_drawdown")
+
+    def test_percentage_product_overflow_is_isolated_from_other_metrics(self):
+        """Finite daily returns can overflow their linked index without failing HTTP."""
+        self._seed_percentage_projection()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("UPDATE positions SET pnl = 1e200")
+        response = self._request("/api/metrics")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["percentage_drawdown"]["state"], "unavailable")
+        self.assertEqual(payload["unavailable_reasons"]["percentage_drawdown"], "numeric_overflow")
+        self.assertEqual(payload["monetary_drawdown"]["state"], "no_drawdown")
+        self.assertIsNotNone(payload["sharpe_daily"])
 
     def test_monetary_drawdown_states_and_shared_filters(self):
         """Risk follows shared filters and distinguishes absent and unavailable data."""
@@ -339,6 +469,7 @@ class QueryApiTests(unittest.TestCase):
             payload["unavailable_reasons"],
             dict.fromkeys(
                 (
+                    "percentage_drawdown",
                     "sharpe_daily",
                     "sortino_daily",
                     "sharpe_annualized",
@@ -780,22 +911,22 @@ class QueryApiTests(unittest.TestCase):
         all_positions = self._request("/api/metrics?status=all")
         open_positions = self._request("/api/metrics?status=open")
 
-        self.assertEqual(all_positions.status_code, 200)
-        self.assertEqual(all_positions.json()["sample_size"], 2)
-        self.assertEqual(all_positions.json()["excluded_open_positions"], 1)
-        self.assertEqual(all_positions.json()["net_pnl"], -12)
-        self.assertEqual(open_positions.status_code, 200)
-        self.assertEqual(open_positions.json()["sample_size"], 0)
-        self.assertEqual(open_positions.json()["excluded_open_positions"], 1)
+        all_payload = self._assert_metric_counts(
+            all_positions, sample_size=2, excluded_open_positions=1,
+        )
+        open_payload = self._assert_metric_counts(
+            open_positions, sample_size=0, excluded_open_positions=1,
+        )
+        self.assertEqual(all_payload["net_pnl"], -12)
         for metric in (
             "net_pnl", "gross_profit", "gross_loss", "winning_trades", "losing_trades",
             "win_rate", "profit_factor", "payoff", "expectancy",
             "sharpe_per_position", "sortino_per_position",
         ):
             with self.subTest(metric=metric):
-                self.assertIsNone(open_positions.json()[metric])
+                self.assertIsNone(open_payload[metric])
                 self.assertEqual(
-                    open_positions.json()["unavailable_reasons"][metric],
+                    open_payload["unavailable_reasons"][metric],
                     "realized_metrics_unavailable_for_open_status",
                 )
 

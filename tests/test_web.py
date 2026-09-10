@@ -61,6 +61,27 @@ class WebTests(unittest.TestCase):
         with self._paths():
             return health()
 
+    def _health_payload_with(self, **expected: str) -> dict[str, Any]:
+        """Read health state and check the named fields shared by a fixture."""
+        payload = self._health_payload()
+        self.assertEqual({field: payload[field] for field in expected}, expected)
+        return payload
+
+    def _open_valid_projection(self) -> sqlite3.Connection:
+        """Create a current-schema projection after preparing valid configuration."""
+        self._write_config()
+        connection = sqlite3.connect(self.data_dir / "algobotdash.sqlite")
+        connection.executescript(SCHEMA)
+        return connection
+
+    def _commit_projection_and_read_health(
+        self, connection: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        """Publish a fixture projection before reading its public health state."""
+        connection.commit()
+        connection.close()
+        return self._health_payload()
+
     def test_dashboard_serves_own_static_page(self) -> None:
         """Dashboard should serve its own static HTML page."""
         response = dashboard()
@@ -135,7 +156,8 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "metric-sharpe-per-position", "metric-sortino-per-position", "metric-sharpe-daily",
   "metric-sortino-daily", "metric-sharpe-annualized", "metric-sortino-annualized",
   "reason-sharpe-daily", "reason-sortino-daily", "reason-sharpe-annualized",
-  "reason-sortino-annualized", "risk-deepest", "risk-longest", "risk-deepest-detail", "risk-longest-detail"];
+  "reason-sortino-annualized", "risk-deepest", "risk-longest", "risk-deepest-detail", "risk-longest-detail",
+  "risk-percentage-deepest", "risk-percentage-longest", "risk-percentage-deepest-detail", "risk-percentage-longest-detail"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -151,6 +173,11 @@ const pendingPositions = [];
 const pendingMetrics = [];
 const pendingFilters = [];
 const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
+  percentage_drawdown: {state: "available", deepest_episode: {depth: -1.25,
+    peak_at: "2026-08-01T03:00:00Z", valley_at: "2026-08-02T12:00:00Z",
+    recovery_at: null, duration_days: 1}, longest_episode: {depth: -1.25,
+    peak_at: "2026-08-01T03:00:00Z", valley_at: "2026-08-02T12:00:00Z",
+    recovery_at: null, duration_days: 1}},
   monetary_drawdown: {state: "available", deepest_episode: {depth: -10,
     peak_at: "2026-08-01T03:00:00Z", valley_at: "2026-08-02T12:00:00Z",
     recovery_at: null, duration_days: 1}, longest_episode: {depth: -10,
@@ -204,6 +231,7 @@ const watchdog = setTimeout(() => {
   await flush(); await flush();
 
   if (elements["#risk-deepest"].textContent !== "-10,00") throw new Error("missing monetary depth");
+  if (elements["#risk-percentage-deepest"].textContent !== "-125,00%") throw new Error("missing percentage depth");
   if (!elements["#risk-longest-detail"].textContent.includes("Em andamento")) throw new Error("missing open episode state");
 
   metricMode = "pending";
@@ -211,9 +239,27 @@ const watchdog = setTimeout(() => {
   elements["#filter-strategy"].listeners.change();
   await flush();
   if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("old metrics remained visible during a filter change");
+  if (elements["#risk-percentage-deepest"].textContent !== "—") throw new Error("old percentage remained visible");
   pendingMetrics.shift()({ok: true, status: 200, json: async () => metricPayload});
   metricMode = "normal";
   await flush(); await flush();
+
+  metricMode = "pending";
+  const olderMetrics = context.loadMetrics();
+  const newerMetrics = context.loadMetrics();
+  pendingMetrics[1]({ok: true, status: 200, json: async () => ({...metricPayload,
+    monetary_drawdown: {...metricPayload.monetary_drawdown,
+      deepest_episode: {...metricPayload.monetary_drawdown.deepest_episode, depth: -30}},
+    percentage_drawdown: {...metricPayload.percentage_drawdown,
+      deepest_episode: {...metricPayload.percentage_drawdown.deepest_episode, depth: -0.3}}})});
+  await flush();
+  pendingMetrics[0]({ok: true, status: 200, json: async () => metricPayload});
+  await Promise.all([olderMetrics, newerMetrics]);
+  pendingMetrics.length = 0;
+  if (elements["#risk-deepest"].textContent !== "-30,00"
+      || elements["#risk-percentage-deepest"].textContent !== "-30,00%") {
+    throw new Error("stale risk response overwrote the current sample");
+  }
 
   positionMode = "pending";
   context.loadPositions();
@@ -232,6 +278,7 @@ const watchdog = setTimeout(() => {
   if (elements["#page-summary"].textContent !== "Projeção indisponível.") throw new Error("stale position escaped terminal state");
   if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("stale metric escaped terminal state");
   if (elements["#risk-deepest"].textContent !== "—") throw new Error("stale drawdown escaped terminal state");
+  if (elements["#risk-percentage-deepest"].textContent !== "—") throw new Error("stale percentage escaped terminal state");
   if (elements["#filter-strategy"].children.some((option) => option.value === "Stale")) throw new Error("stale filter catalog escaped terminal state");
 
   positionMode = "normal";
@@ -307,7 +354,8 @@ const ids = ["service", "configuration", "source", "projection", "source-name",
   "metric-sharpe-per-position", "metric-sortino-per-position", "metric-sharpe-daily",
   "metric-sortino-daily", "metric-sharpe-annualized", "metric-sortino-annualized",
   "reason-sharpe-daily", "reason-sortino-daily", "reason-sharpe-annualized",
-  "reason-sortino-annualized", "risk-deepest", "risk-longest", "risk-deepest-detail", "risk-longest-detail"];
+  "reason-sortino-annualized", "risk-deepest", "risk-longest", "risk-deepest-detail", "risk-longest-detail",
+  "risk-percentage-deepest", "risk-percentage-longest", "risk-percentage-deepest-detail", "risk-percentage-longest-detail"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
@@ -500,6 +548,30 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   if (elements["#risk-longest"].textContent !== "2 dias") throw new Error("missing civil duration");
   if (elements["#risk-deepest-detail"].textContent.includes("Em andamento")) throw new Error("recovered episode marked open");
   if (!elements["#risk-deepest-detail"].textContent.includes("03/08/2026")) throw new Error("missing recovery date");
+  if (!elements["#risk-percentage-deepest-detail"].textContent.includes("não fornecido")) {
+    throw new Error("legacy percentage absence was not reported independently");
+  }
+  const percentRecovered = {...recovered, depth: -0.2};
+  context.renderMetrics({...metricPayload,
+    monetary_drawdown: {state: "available", deepest_episode: recovered, longest_episode: recovered},
+    percentage_drawdown: {state: "available", deepest_episode: percentRecovered, longest_episode: percentRecovered}});
+  if (elements["#risk-percentage-deepest"].textContent !== "-20,00%"
+      || elements["#risk-percentage-longest"].textContent !== "2 dias"
+      || elements["#risk-percentage-longest-detail"].textContent.includes("Em andamento")) {
+    throw new Error("recovered percentage episode was rendered incorrectly");
+  }
+  for (const [state, expected] of [["empty_sample", "Sem dados"],
+    ["no_drawdown", "Sem drawdown"], ["unavailable", "cobertura"]]) {
+    context.renderMetrics({...metricPayload,
+      monetary_drawdown: {state: "available", deepest_episode: recovered, longest_episode: recovered},
+      percentage_drawdown: {state, deepest_episode: null, longest_episode: null},
+      unavailable_reasons: {percentage_drawdown: "invalid_opening_balance_coverage"}});
+    if (elements["#risk-deepest"].textContent !== "-20,00") throw new Error("percentage state cleared monetary risk");
+    if (elements["#risk-percentage-deepest"].textContent !== "—"
+        || !elements["#risk-percentage-longest-detail"].textContent.includes(expected)) {
+      throw new Error("missing percentage state detail");
+    }
+  }
   context.renderMetrics(legacyPayload);
   if (!elements["#temporal-metrics-summary"].textContent.includes("não fornecidas")) {
     throw new Error("legacy backend was presented as real zero coverage");
@@ -589,10 +661,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
     def test_health_distinguishes_missing_configuration_source_and_projection(self) -> None:
         """Health should distinguish an absent configuration from other states."""
-        payload = self._health_payload()
-
-        self.assertEqual(payload["status"], "error")
-        self.assertEqual(payload["version"], "0.1.0")
+        payload = self._health_payload_with(status="error", version="0.1.0")
         self.assertEqual(payload["configuration"], "invalid")
         self.assertEqual(payload["source"], "unknown")
         self.assertEqual(payload["projection"], "unavailable")
@@ -603,20 +672,14 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
         self._write_config()
         (self.source_dir / "ReportHistory.xlsx").write_bytes(b"fixture")
 
-        payload = self._health_payload()
-
-        self.assertEqual(payload["configuration"], "valid")
-        self.assertEqual(payload["source"], "available")
+        payload = self._health_payload_with(configuration="valid", source="available")
         self.assertEqual(payload["projection"], "unavailable")
 
     def test_health_reports_valid_configuration_with_missing_source(self) -> None:
         """Health should report a valid configuration and missing source."""
         self._write_config()
 
-        payload = self._health_payload()
-
-        self.assertEqual(payload["configuration"], "valid")
-        self.assertEqual(payload["source"], "missing")
+        payload = self._health_payload_with(configuration="valid", source="missing")
         self.assertEqual(payload["status"], "error")
 
     def test_health_reports_invalid_projection_when_database_is_unreadable(self) -> None:
@@ -625,41 +688,26 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
         database_path = self.data_dir / "algobotdash.sqlite"
         database_path.write_bytes(b"projection")
 
-        payload = self._health_payload()
-
-        self.assertEqual(payload["projection"], "invalid")
-        self.assertEqual(payload["status"], "error")
+        self._health_payload_with(projection="invalid", status="error")
 
     def test_health_rejects_projection_with_previous_table_shape(self) -> None:
         """Health should validate the complete current schema, not only imports."""
-        self._write_config()
-        database_path = self.data_dir / "algobotdash.sqlite"
-        connection = sqlite3.connect(database_path)
-        connection.executescript(SCHEMA)
+        connection = self._open_valid_projection()
         connection.execute("DROP TABLE transactions")
         connection.execute("CREATE TABLE transactions (id INTEGER PRIMARY KEY)")
-        connection.commit()
-        connection.close()
-
-        payload = self._health_payload()
+        payload = self._commit_projection_and_read_health(connection)
 
         self.assertEqual(payload["projection"], "invalid")
         self.assertEqual(payload["status"], "error")
 
     def test_health_reports_valid_projection_and_last_import(self) -> None:
         """Health should expose the latest successful import timestamp."""
-        self._write_config()
-        database_path = self.data_dir / "algobotdash.sqlite"
-        connection = sqlite3.connect(database_path)
-        connection.executescript(SCHEMA)
+        connection = self._open_valid_projection()
         connection.execute(
             "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (1, "ReportHistory.xlsx", "hash", "2026-08-31T10:00:00+00:00", 1, 1, 0, 0),
         )
-        connection.commit()
-        connection.close()
-
-        payload = self._health_payload()
+        payload = self._commit_projection_and_read_health(connection)
 
         self.assertEqual(payload["projection"], "available")
         self.assertEqual(payload["last_imported_at"], "2026-08-31T10:00:00+00:00")

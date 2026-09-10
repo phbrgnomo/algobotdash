@@ -41,6 +41,44 @@ Cobertura de saldo ausente não impede drawdown monetário. Agregados que excede
 representação numérica na leitura mantêm o erro de projeção existente; overflow
 durante o cálculo do drawdown produz `unavailable`, sem publicar episódios parciais.
 
+## Episódios percentuais (Issue #17)
+
+`percentage_drawdown` é aditivo em `GET /api/metrics`, com os mesmos estados e campos
+de episódios do monetário. `depth` é a razão negativa `índice / pico - 1`, sem
+arredondamento na API; `-0.25` é exibido como `-25,00%`. Os seletores de profundidade
+e duração são independentes e preservam as primeiras ocorrências nos empates.
+
+O índice interno parte de 100 na meia-noite de `effective_date_from` em Bahia.
+Para cada dia útil, soma-se exatamente o P&L dos fechamentos filtrados e calcula-se
+`r = P&L diário / saldo global de abertura ajustado`; o índice passa a
+`índice anterior × (1 + r)`. As operações usam `Fraction` sobre representações
+decimais dos valores da projeção, preservando a extração de saldo da Issue #15.
+Cada ponto recebe o maior `exit_at` selecionado naquele dia, convertido para UTC `Z`.
+Dias sem encerramentos têm retorno zero implícito; fins de semana são excluídos.
+O índice não é publicado como série nesta entrega.
+
+O pico inclui o valor inicial positivo de 100. Um índice negativo é permitido e
+continua sendo multiplicado pelos fatores diários; um índice exatamente zero
+permanece zero. Não há clamp, reinício ou recuperação artificial. Episódios se
+recuperam ao atingir ou superar o pico; picos e vales iguais conservam a primeira
+ocorrência. Duração segue as datas civis em Bahia, com episódios abertos limitados
+por `effective_date_to` e `recovery_at` nulo.
+
+`status=open` prevalece e retorna `unavailable` com
+`realized_metrics_unavailable_for_open_status`. Sem posições realizadas, o estado
+é `empty_sample`, mesmo com intervalo explícito. Saldo ausente ou não positivo nos
+dias úteis com encerramentos retorna `unavailable` com
+`invalid_opening_balance_coverage`. Retorno, índice ou profundidade não representável
+retorna `unavailable` com `numeric_overflow`, sem episódios parciais. Os motivos
+ficam em `unavailable_reasons.percentage_drawdown`. Uma trajetória válida sem queda
+retorna `no_drawdown`; todos os estados diferentes de `available` têm seletores nulos.
+As exigências de amostra de Sharpe/Sortino não se aplicam ao drawdown percentual.
+
+O dashboard usa dois cartões percentuais adicionais na mesma requisição de métricas,
+sob o controle de geração de filtros já existente. Ausência do campo no backend
+é informada apenas nos cartões percentuais, preservando os monetários. Falhas de
+cobertura ou de cálculo percentual também não invalidam o drawdown monetário.
+
 ## Consequências
 
 - Resultados monetários permanecem disponíveis quando razões estatísticas não podem ser calculadas.
