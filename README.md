@@ -78,7 +78,7 @@ nulos e mensagens visíveis; o último usa `unavailable_reasons.monetary_drawdow
 O cálculo monetário independe da cobertura do saldo ajustado. As convenções completas
 estão em [ADR 0003](docs/adr/0003-reconstruction-and-metric-conventions.md).
 
-O grupo Risco também apresenta os episódios percentuais mais profundo e mais longo.
+O grupo Risco também apresenta os episódios percentuais mais profundos e mais longos.
 `percentage_drawdown` usa o mesmo contrato, com `depth` em fração negativa (`-0.25`
 significa `-25,00%`). O índice interno começa em 100 e encadeia os retornos diários
 filtrados sobre o saldo global de abertura ajustado. Cada retorno é aplicado no último

@@ -174,6 +174,49 @@ class PercentageDrawdownTests(unittest.TestCase):
         episode = cast(DrawdownEpisode, result["deepest_episode"])
         self.assertEqual(episode["valley_at"], "2026-08-05T12:00:00Z")
 
+    def test_equal_percentage_episodes_keep_first_depth_and_duration(self):
+        """Equal percentage episodes retain the first one for both selectors."""
+        result, reason = calculate_percentage_drawdown(
+            (
+                (datetime(2026, 8, 3, 12, tzinfo=timezone.utc), -20),
+                (datetime(2026, 8, 5, 12, tzinfo=timezone.utc), 50),
+                (datetime(2026, 8, 6, 12, tzinfo=timezone.utc), -20),
+                (datetime(2026, 8, 7, 12, tzinfo=timezone.utc), 25),
+            ),
+            {
+                date(2026, 8, 3): 100,
+                date(2026, 8, 5): 100,
+                date(2026, 8, 6): 100,
+                date(2026, 8, 7): 100,
+            },
+            period=(date(2026, 8, 3), date(2026, 8, 7)),
+        )
+        expected = {
+            "depth": -0.2,
+            "peak_at": "2026-08-03T03:00:00Z",
+            "valley_at": "2026-08-03T12:00:00Z",
+            "recovery_at": "2026-08-05T12:00:00Z",
+            "duration_days": 2,
+        }
+        self.assertIsNone(reason)
+        self.assertEqual(result["deepest_episode"], expected)
+        self.assertEqual(result["longest_episode"], expected)
+
+    def test_same_day_mixed_returns_produce_no_drawdown(self):
+        """Opposite P&L events on one day are aggregated before index linking."""
+        result, reason = calculate_percentage_drawdown(
+            (
+                (datetime(2026, 8, 3, 12, tzinfo=timezone.utc), -20),
+                (datetime(2026, 8, 3, 17, tzinfo=timezone.utc), 20),
+            ),
+            {date(2026, 8, 3): 100},
+            period=(date(2026, 8, 3), date(2026, 8, 3)),
+        )
+        self.assertEqual(result, {
+            "state": "no_drawdown", "deepest_episode": None, "longest_episode": None,
+        })
+        self.assertIsNone(reason)
+
     def test_daily_linking_uses_last_exit_and_recovers_exactly(self):
         """100 -> 70 -> 100 recovers even though 3/7 is a repeating return."""
         result, reason = calculate_percentage_drawdown(
