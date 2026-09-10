@@ -71,7 +71,7 @@ Capital contábil disponível no início operacional do dia, após o ajuste de s
 _Avoid_: capital informado manualmente, saldo após incorporar operações do dia
 
 **Posição analítica**:
-Unidade de análise do MVP, identificada pelo registro de posição; é classificada pela ordem correspondente quando `position_id` e `symbol_raw` coincidem e a ordem possui uma estratégia. Ciclos de piramidação não são inferidos nesta versão.
+Unidade de análise do MVP, identificada pelo registro de posição; recebe a classificação da ordem correspondente quando `position_id` e `symbol_raw` coincidem, mesmo que essa ordem não possua estratégia. Ciclos de piramidação não são inferidos nesta versão.
 _Avoid_: ciclo implícito, agrupamento por proximidade
 
 **Associação de posição**:

@@ -403,7 +403,7 @@ def read_filter_options(path: Path) -> dict[str, list[str]]:
                 row[0]
                 for row in connection.execute(
                     "SELECT DISTINCT strategy FROM positions "
-                    "WHERE strategy IS NOT NULL ORDER BY strategy"
+                    "WHERE is_associated = 1 AND strategy IS NOT NULL ORDER BY strategy"
                 )
             ]
             symbol_families = [

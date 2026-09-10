@@ -1351,7 +1351,7 @@ class QueryApiTests(unittest.TestCase):
                 connection,
                 [
                     (
-                        "400", None, "BIT", "BITQ26", "sell",
+                        "400", "Unproved", "BIT", "BITQ26", "sell",
                         "2026-08-04T10:00:00-03:00",
                         "2026-08-04T11:00:00-03:00", "closed", 1, 1, 1, 2,
                         0, 0, 1, 0, 2,
