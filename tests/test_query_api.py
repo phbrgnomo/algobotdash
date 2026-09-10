@@ -1100,12 +1100,15 @@ class QueryApiTests(unittest.TestCase):
         response = self._request("/api/metrics")
 
         self.assertEqual(response.status_code, 200)
-        for metric in (
-            "net_pnl", "gross_profit", "gross_loss", "win_rate", "profit_factor",
-            "payoff", "expectancy", "sharpe_per_position", "sortino_per_position",
-        ):
-            with self.subTest(metric=metric):
-                self.assertTrue(math.isfinite(response.json()[metric]))
+        payload = response.json()
+        self.assertEqual(payload["net_pnl"], 0)
+        self.assertEqual(payload["gross_profit"], 1e308)
+        self.assertEqual(payload["gross_loss"], -1e308)
+        self.assertAlmostEqual(payload["profit_factor"], 1)
+        self.assertAlmostEqual(payload["payoff"], 1)
+        self.assertAlmostEqual(payload["expectancy"], 0)
+        self.assertAlmostEqual(payload["sharpe_per_position"], 0)
+        self.assertAlmostEqual(payload["sortino_per_position"], 0)
 
     def test_metrics_explain_nonrepresentable_ratios(self) -> None:
         """Return null with an explicit reason instead of infinite ratios."""

@@ -338,7 +338,7 @@ def read_positions(
     where_sql, parameters = _position_where(active_filters)
     query = (  # Fixed predicates and allowlisted ordering; values stay parameterized.
         "SELECT position_id, strategy, symbol_family, " # nosec B608
-        "CASE WHEN strategy IS NOT NULL AND symbol_family IS NOT NULL "
+        "CASE WHEN is_associated = 1 AND strategy IS NOT NULL AND symbol_family IS NOT NULL "
         "THEN symbol_family || ' ' || strategy END AS strategy_key, "
         "CASE WHEN is_associated = 1 THEN 'associated' ELSE 'unassociated' "
         "END AS association, "
@@ -544,7 +544,8 @@ def read_strategy_keys(path: Path) -> list[ProjectionRow]:
             rows = connection.execute(
                 "SELECT symbol_family || ' ' || strategy AS strategy_key, "
                 "strategy, symbol_family "
-                "FROM positions WHERE strategy IS NOT NULL AND symbol_family IS NOT NULL "
+                "FROM positions WHERE is_associated = 1 AND strategy IS NOT NULL "
+                "AND symbol_family IS NOT NULL "
                 "GROUP BY symbol_family, strategy ORDER BY symbol_family, strategy"
             ).fetchall()
         except sqlite3.Error as exc:

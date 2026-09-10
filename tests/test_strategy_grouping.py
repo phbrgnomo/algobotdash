@@ -45,7 +45,7 @@ class StrategyGroupingTests(unittest.TestCase):
         connection.executescript(SCHEMA)
         connection.execute(
             "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 3, 3, 1, 0),
+            (1, "ReportHistory.xlsx", "strategy-hash", "2026-08-01T00:00:00+00:00", 4, 4, 1, 0),
         )
         insert_positions(
             connection,
@@ -61,6 +61,11 @@ class StrategyGroupingTests(unittest.TestCase):
                 (
                     "unknown", None, "WIN", "WINQ26", "buy", "2026-08-03T10:00:00+00:00",
                     None, "open", 1, 1, 100, None, -1, 0, 0, 0, 1,
+                ),
+                (
+                    "unassociated", "Turtle", "WIN", "WINV26", "sell",
+                    "2026-08-04T10:00:00+00:00", "2026-08-04T11:00:00+00:00",
+                    "closed", 1, 1, 100, 99, -1, 0, -1, 0, 1,
                 ),
             ],
         )
@@ -80,6 +85,9 @@ class StrategyGroupingTests(unittest.TestCase):
         self.assertEqual(by_id["win"]["strategy_key"], "WIN FVG")
         self.assertEqual(by_id["wdo"]["strategy_key"], "WDO FVG")
         self.assertIsNone(by_id["unknown"]["strategy_key"])
+        self.assertEqual(by_id["unassociated"]["strategy"], "Turtle")
+        self.assertEqual(by_id["unassociated"]["association"], "unassociated")
+        self.assertIsNone(by_id["unassociated"]["strategy_key"])
         self.assertEqual(configured_groups.json(), {"items": [{"name": "FVG"}]})
         self.assertEqual(
             strategy_keys.json(),
