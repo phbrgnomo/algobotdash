@@ -106,6 +106,17 @@ class RefreshOperationTests(unittest.TestCase):
         self.assertIsNotNone(restored.started_at)
         self.assertIsNotNone(restored.finished_at)
 
+    def test_store_closes_connection_after_operation(self) -> None:
+        """Store methods close SQLite handles after transaction handling completes."""
+        connection = sqlite3.connect(self.store.path)
+        connection.row_factory = sqlite3.Row
+
+        with patch("algobotdash.refresh.sqlite3.connect", return_value=connection):
+            self.assertIsNone(self.store.latest())
+
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+
     def test_interrupted_operation_reconciles_with_published_revision(self) -> None:
         """Recovery reports success when the operation's exact revision was published."""
         operation = self.store.create("published-revision")

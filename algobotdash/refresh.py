@@ -6,6 +6,8 @@ import json
 import sqlite3
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,10 +100,13 @@ class RefreshOperationStore:
         database_path = Path(database)
         return cls(database_path.with_name(f"{database_path.name}.operations.sqlite"))
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=5)
         connection.row_factory = sqlite3.Row
-        return connection
+        with closing(connection):
+            with connection:
+                yield connection
 
     def create(self, expected_revision: str | None = None) -> RefreshOperation:
         """Persist a queued attempt before scheduling background work."""
