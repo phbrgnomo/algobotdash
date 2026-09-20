@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import ConfigurationError, load_config
@@ -20,6 +22,8 @@ from .metrics import (
     calculate_temporal_metrics,
     effective_metric_period,
 )
+from .refresh import RefreshInProgressError, RefreshLockUnavailableError
+from .refresh_runner import RefreshRunner
 from .storage import (
     PositionFilters,
     ProjectionUnavailableError,
@@ -46,6 +50,26 @@ app = FastAPI(title="algobotdash", version=APP_VERSION)
 
 def _error_message(exc: Exception) -> str:
     return str(exc).splitlines()[0][:240] or exc.__class__.__name__
+
+
+def _allowed_refresh_origin(origin: str | None) -> bool:
+    """Accept only explicit, exact local HTTP origins."""
+    if origin is None:
+        return False
+    try:
+        parsed = urlsplit(origin)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def _health_state() -> dict[str, Any]:
@@ -194,6 +218,14 @@ def _status_state() -> dict[str, Any]:
 
     projection = health_state["projection"]
     state = "ready" if last_import else "empty" if projection == "available" else "unavailable"
+    refresh_operation: dict[str, Any] | None = None
+    try:
+        latest_refresh = RefreshRunner(CONFIG_PATH, DATABASE_PATH).latest()
+    except (OSError, ValueError, sqlite3.Error, RefreshLockUnavailableError):
+        logger.exception("não foi possível ler o estado das atualizações")
+    else:
+        if latest_refresh is not None:
+            refresh_operation = latest_refresh.as_dict()
     return {
         "state": state,
         "configuration": health_state["configuration"],
@@ -203,6 +235,7 @@ def _status_state() -> dict[str, Any]:
         "last_import": last_import,
         "timezone": health_state["timezone"],
         "projection_revision": health_state["projection_revision"],
+        "refresh_operation": refresh_operation,
     }
 
 
@@ -402,6 +435,76 @@ async def imports_endpoint(
 async def status_endpoint() -> dict[str, Any]:
     """Return dashboard state even while the projection is unavailable."""
     return _status_state()
+
+
+@app.post("/api/refresh", status_code=202)
+async def start_refresh_endpoint(
+    request: Request,
+    request_marker: Annotated[str | None, Header(alias="X-Algobotdash-Request")] = None,
+) -> JSONResponse:
+    """Start one durable background refresh."""
+    origin = request.headers.get("origin")
+    if request_marker != "refresh" or not _allowed_refresh_origin(origin):
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "refresh_request_forbidden"},
+        )
+    try:
+        runner = RefreshRunner(CONFIG_PATH, DATABASE_PATH)
+        operation = runner.start()
+    except RefreshInProgressError as exc:
+        active_id = None
+        try:
+            latest = RefreshRunner(CONFIG_PATH, DATABASE_PATH).latest()
+        except (OSError, ValueError, sqlite3.Error):
+            latest = None
+        if latest is not None and latest.state in {"queued", "running"}:
+            active_id = latest.operation_id
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "refresh_in_progress", "operation_id": active_id},
+        ) from exc
+    except (
+        OSError,
+        ValueError,
+        sqlite3.Error,
+        RefreshLockUnavailableError,
+    ) as exc:
+        logger.exception("não foi possível registrar a atualização")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "refresh_state_unavailable"},
+        ) from exc
+    return JSONResponse(
+        status_code=202,
+        content={
+            **operation.as_dict(),
+            "status_url": f"/api/refresh/{operation.operation_id}",
+        },
+    )
+
+
+@app.get("/api/refresh/{operation_id}")
+async def refresh_operation_endpoint(operation_id: str) -> dict[str, Any]:
+    """Return one persisted background refresh attempt."""
+    try:
+        operation = RefreshRunner(CONFIG_PATH, DATABASE_PATH).get(operation_id)
+    except (
+        OSError,
+        ValueError,
+        sqlite3.Error,
+        RefreshLockUnavailableError,
+    ) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "refresh_state_unavailable"},
+        ) from exc
+    if operation is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "refresh_operation_not_found"},
+        )
+    return operation.as_dict()
 
 
 @app.get("/")

@@ -8,6 +8,12 @@ from typing import cast
 
 from .config import load_config
 from .environment import load_environment
+from .refresh import (
+    DatabaseRefreshLock,
+    RefreshInProgressError,
+    RefreshLockUnavailableError,
+    RefreshOperationStore,
+)
 from .service import ImportService
 
 
@@ -26,7 +32,15 @@ def main() -> None:
     args = parser.parse_args()
     config_path = cast(str, args.config)
     database_path = cast(str, args.database)
-    summary = ImportService(load_config(config_path)).refresh(database_path)
+    store = RefreshOperationStore.for_database(database_path)
+    try:
+        with DatabaseRefreshLock(database_path):
+            store.reconcile_interrupted(database_path, live_operation_ids=set())
+            summary = ImportService(load_config(config_path)).refresh_with_lock(database_path)
+    except RefreshInProgressError as exc:
+        raise SystemExit("Já existe uma atualização em andamento para este banco.") from exc
+    except RefreshLockUnavailableError as exc:
+        raise SystemExit(str(exc)) from exc
     print(
         f"Importação válida: {summary.positions_created} posições, "
         f"{summary.rejected_count} rejeições"

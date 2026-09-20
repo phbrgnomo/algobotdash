@@ -151,7 +151,7 @@ docker compose up -d
 
 Abra `http://localhost:8765/`. Para alterar a porta do host, edite `ALGOBOTDASH_PORT` no `.env` antes de iniciar o Compose.
 
-O serviço não importa o workbook automaticamente. Para criar ou reconstruir a projeção no volume `data/`, execute:
+O serviço não importa o workbook automaticamente. Use o botão `Atualizar dados` no dashboard ou, pela CLI, execute:
 
 ```bash
 docker compose run --rm algobotdash \
@@ -170,17 +170,29 @@ poetry run uvicorn algobotdash.web:app --host 127.0.0.1 --port 8765
 
 O dashboard inicial é uma página própria de estado operacional. Ele não serve nem reutiliza o HTML legado produzido por `generate_trade_report.py`; `reports/` permanece reservado para exportações futuras.
 
+O dashboard inicia a atualização em segundo plano e mostra suas etapas sem interromper
+consultas. Recarregar ou fechar a página não cancela o trabalho. O estado das tentativas
+fica em `data/algobotdash.sqlite.operations.sqlite`; o arquivo
+`data/algobotdash.sqlite.refresh.lock` impede concorrência entre o backend e a CLI.
+`POST /api/refresh` retorna HTTP 202 e um identificador consultável em
+`GET /api/refresh/{operation_id}`. O POST exige o cabeçalho
+`X-Algobotdash-Request: refresh` e um `Origin` explícito de `localhost`,
+`127.0.0.1` ou `::1`; uma tentativa simultânea retorna HTTP 409.
+
 ## Fluxo de atualização
 
 1. Atualização manual do workbook.
-2. Acionamento via CLI ou dashboard.
+2. Acionamento via CLI ou `POST /api/refresh` no dashboard.
 3. Validação do YAML e da fonte.
 4. Reconstrução em uma projeção temporária.
 5. Publicação atômica somente se a importação for válida.
 6. Registro de hash, horário, contagens, rejeições, fuso e revisão única.
 7. Consulta da nova projeção pela API e pelo dashboard, que detecta a revisão mesmo se o hash não mudou.
 
-Em caso de falha, a última projeção válida permanece disponível.
+Em caso de falha, a última projeção válida permanece intacta. As regras de disponibilidade
+continuam valendo: configuração inválida ou fuso divergente bloqueiam as consultas até uma
+atualização válida. Após reinício do serviço, uma operação interrompida é reconciliada com
+a revisão publicada e não é retomada automaticamente.
 
 ## Métricas
 
