@@ -16,6 +16,11 @@ processos. Uma segunda tentativa não espera em fila: a API retorna conflito e a
 termina com erro. Consultas continuam lendo a projeção publicada enquanto outra é
 construída em arquivo temporário.
 
+Cada caminho de projeção possui seu próprio executor de uma thread. Atualizações do mesmo
+banco permanecem serializadas pelo bloqueio, enquanto bancos independentes podem atualizar
+em paralelo. O módulo pode ser importado em outros sistemas, mas iniciar uma atualização
+exige o `fcntl` fornecido pelo runtime POSIX/Linux adotado pelo projeto.
+
 Antes de publicar, a operação define a revisão esperada e a grava na nova projeção. Após
 um reinício, o backend marca uma tentativa interrompida como concluída quando encontra
 essa revisão publicada. Sem essa evidência, registra erro de interrupção. Não existe

@@ -1,4 +1,5 @@
 """Tests for dashboard endpoints and health diagnostics."""
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from unittest.mock import patch
 import httpx
 
 from algobotdash.storage import SCHEMA
-from algobotdash.refresh import RefreshOperationStore
+from algobotdash.refresh import RefreshOperation, RefreshOperationStore
 from algobotdash.service import ImportSummary
 from algobotdash.web import app, dashboard, health
 from tests.fixture_helpers import workbook
@@ -840,23 +841,116 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
             response.json()["detail"]["code"], "refresh_operation_not_found"
         )
 
-    def test_refresh_api_rejects_cross_origin_or_unmarked_requests(self) -> None:
-        """External browser pages cannot trigger the mutable local endpoint."""
-        with self._paths():
-            unmarked = self._request("POST", "/api/refresh", headers={})
-            external = self._request(
+    def test_refresh_api_validates_local_origins_without_allowlist_bypass(self) -> None:
+        """Only marked requests from exact loopback origins can start a refresh."""
+        operation = RefreshOperation(
+            operation_id="origin-test",
+            state="queued",
+            stage="queued",
+            created_at="2026-09-20T12:00:00+00:00",
+            started_at=None,
+            finished_at=None,
+            expected_revision="revision",
+            summary={},
+            error_code=None,
+            error_message=None,
+        )
+        with self._paths(), patch(
+            "algobotdash.web.RefreshRunner.start", return_value=operation
+        ):
+            no_origin = self._request("POST", "/api/refresh")
+            localhost = self._request(
                 "POST",
                 "/api/refresh",
                 headers={
                     "X-Algobotdash-Request": "refresh",
-                    "Origin": "https://example.com",
+                    "Origin": "http://localhost",
+                },
+            )
+            localhost_port = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "https://localhost:8765",
+                },
+            )
+            ipv4 = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "http://127.0.0.1:8765",
+                },
+            )
+            ipv6 = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "http://[::1]:8765",
+                },
+            )
+            unmarked = self._request("POST", "/api/refresh", headers={})
+            lookalike = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "https://localhost.example.com",
+                },
+            )
+            malformed = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "http://[::1",
+                },
+            )
+            userinfo = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "http://localhost@example.com",
                 },
             )
 
-        self.assertEqual(unmarked.status_code, 403)
-        self.assertEqual(external.status_code, 403)
         self.assertEqual(
-            external.json()["detail"]["code"], "refresh_request_forbidden"
+            (
+                no_origin.status_code,
+                localhost.status_code,
+                localhost_port.status_code,
+                ipv4.status_code,
+                ipv6.status_code,
+            ),
+            (202, 202, 202, 202, 202),
+        )
+        self.assertEqual(
+            (
+                unmarked.status_code,
+                lookalike.status_code,
+                malformed.status_code,
+                userinfo.status_code,
+            ),
+            (403, 403, 403, 403),
+        )
+        self.assertEqual(
+            lookalike.json()["detail"]["code"], "refresh_request_forbidden"
+        )
+
+    def test_refresh_api_reports_unavailable_platform_lock(self) -> None:
+        """A runtime without fcntl keeps reads available and rejects refresh clearly."""
+        with self._paths(), patch("algobotdash.refresh._fcntl", None):
+            status = self._request("GET", "/api/status")
+            refresh = self._request("POST", "/api/refresh")
+
+        self.assertEqual(status.status_code, 200)
+        self.assertIsNone(status.json()["refresh_operation"])
+        self.assertEqual(refresh.status_code, 503)
+        self.assertEqual(
+            refresh.json()["detail"]["code"], "refresh_state_unavailable"
         )
 
     def test_fastapi_health_returns_service_error_for_missing_config(self) -> None:

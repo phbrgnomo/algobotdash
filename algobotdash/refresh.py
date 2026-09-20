@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import sqlite3
 import threading
@@ -12,11 +11,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised by patch on the Linux test runtime
+    _fcntl = None
+
 RefreshState = Literal["queued", "running", "completed", "error"]
 
 
 class RefreshInProgressError(RuntimeError):
     """Raised when another process or thread is already refreshing a projection."""
+
+
+class RefreshLockUnavailableError(RuntimeError):
+    """Raised when the runtime cannot provide the required process lock."""
 
 
 @dataclass(frozen=True)
@@ -231,7 +239,8 @@ def _published_revision(database: Path) -> str | None:
     if not database.is_file():
         return None
     try:
-        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        database_uri = f"{database.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(database_uri, uri=True)
         try:
             row = connection.execute(
                 "SELECT revision FROM projection_metadata WHERE id = 1"
@@ -264,13 +273,17 @@ class DatabaseRefreshLock:
 
     def acquire(self) -> None:
         """Acquire immediately or report that another importer owns the database."""
+        if _fcntl is None:
+            raise RefreshLockUnavailableError(
+                "o bloqueio entre processos exige um runtime POSIX com fcntl"
+            )
         if not self._thread_lock.acquire(blocking=False):
             raise RefreshInProgressError("já existe uma atualização em andamento")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             stream = self.path.open("a+", encoding="utf-8")  # pylint: disable=consider-using-with
             try:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _fcntl.flock(stream.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
             except OSError as exc:
                 stream.close()
                 if isinstance(exc, BlockingIOError):
@@ -289,7 +302,8 @@ class DatabaseRefreshLock:
             return
         try:
             try:
-                fcntl.flock(self._stream.fileno(), fcntl.LOCK_UN)
+                if _fcntl is not None:
+                    _fcntl.flock(self._stream.fileno(), _fcntl.LOCK_UN)
             finally:
                 self._stream.close()
         finally:

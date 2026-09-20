@@ -19,7 +19,8 @@ from .service import ImportService, ImportSummary
 
 logger = logging.getLogger(__name__)
 
-_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="algobotdash-refresh")
+_executors: dict[Path, ThreadPoolExecutor] = {}
+_executors_guard = threading.Lock()
 _live_operations: set[str] = set()
 _live_guard = threading.Lock()
 
@@ -27,6 +28,20 @@ _live_guard = threading.Lock()
 def _live_snapshot() -> set[str]:
     with _live_guard:
         return set(_live_operations)
+
+
+def _executor_for_database(database: Path) -> ThreadPoolExecutor:
+    """Serialize one projection without blocking refreshes of unrelated databases."""
+    key = database.resolve()
+    with _executors_guard:
+        executor = _executors.get(key)
+        if executor is None:
+            executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"algobotdash-refresh-{len(_executors) + 1}",
+            )
+            _executors[key] = executor
+        return executor
 
 
 def _summary_payload(summary: ImportSummary) -> dict[str, object]:
@@ -83,7 +98,9 @@ class RefreshRunner:
             with _live_guard:
                 _live_operations.add(operation.operation_id)
             try:
-                _ = _executor.submit(self._run, operation, lock)
+                _ = _executor_for_database(self.database_path).submit(
+                    self._run, operation, lock
+                )
             except Exception:
                 with _live_guard:
                     _live_operations.discard(operation.operation_id)

@@ -22,7 +22,7 @@ from .metrics import (
     calculate_temporal_metrics,
     effective_metric_period,
 )
-from .refresh import RefreshInProgressError
+from .refresh import RefreshInProgressError, RefreshLockUnavailableError
 from .refresh_runner import RefreshRunner
 from .storage import (
     PositionFilters,
@@ -50,6 +50,26 @@ app = FastAPI(title="algobotdash", version=APP_VERSION)
 
 def _error_message(exc: Exception) -> str:
     return str(exc).splitlines()[0][:240] or exc.__class__.__name__
+
+
+def _allowed_refresh_origin(origin: str | None) -> bool:
+    """Accept absent origins for API clients or exact local HTTP origins."""
+    if origin is None:
+        return True
+    try:
+        parsed = urlsplit(origin)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def _health_state() -> dict[str, Any]:
@@ -201,7 +221,7 @@ def _status_state() -> dict[str, Any]:
     refresh_operation: dict[str, Any] | None = None
     try:
         latest_refresh = RefreshRunner(CONFIG_PATH, DATABASE_PATH).latest()
-    except (OSError, ValueError, sqlite3.Error):
+    except (OSError, ValueError, sqlite3.Error, RefreshLockUnavailableError):
         logger.exception("não foi possível ler o estado das atualizações")
     else:
         if latest_refresh is not None:
@@ -424,10 +444,7 @@ async def start_refresh_endpoint(
 ) -> JSONResponse:
     """Start one durable background refresh."""
     origin = request.headers.get("origin")
-    origin_host = urlsplit(origin).hostname if origin is not None else None
-    if request_marker != "refresh" or (
-        origin is not None and origin_host not in {"localhost", "127.0.0.1", "::1"}
-    ):
+    if request_marker != "refresh" or not _allowed_refresh_origin(origin):
         raise HTTPException(
             status_code=403,
             detail={"code": "refresh_request_forbidden"},
@@ -447,7 +464,12 @@ async def start_refresh_endpoint(
             status_code=409,
             detail={"code": "refresh_in_progress", "operation_id": active_id},
         ) from exc
-    except (OSError, ValueError, sqlite3.Error) as exc:
+    except (
+        OSError,
+        ValueError,
+        sqlite3.Error,
+        RefreshLockUnavailableError,
+    ) as exc:
         logger.exception("não foi possível registrar a atualização")
         raise HTTPException(
             status_code=503,
@@ -467,7 +489,12 @@ async def refresh_operation_endpoint(operation_id: str) -> dict[str, Any]:
     """Return one persisted background refresh attempt."""
     try:
         operation = RefreshRunner(CONFIG_PATH, DATABASE_PATH).get(operation_id)
-    except (OSError, ValueError, sqlite3.Error) as exc:
+    except (
+        OSError,
+        ValueError,
+        sqlite3.Error,
+        RefreshLockUnavailableError,
+    ) as exc:
         raise HTTPException(
             status_code=503,
             detail={"code": "refresh_state_unavailable"},
