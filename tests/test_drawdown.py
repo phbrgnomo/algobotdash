@@ -4,12 +4,29 @@ import unittest
 from datetime import date, datetime, timezone
 from fractions import Fraction
 from typing import cast
+from zoneinfo import ZoneInfo
 
 from algobotdash.metrics import (
     DrawdownEpisode,
-    calculate_monetary_drawdown,
-    calculate_percentage_drawdown,
+    calculate_monetary_drawdown as _calculate_monetary_drawdown,
+    calculate_percentage_drawdown as _calculate_percentage_drawdown,
 )
+
+ANALYSIS_TIMEZONE = ZoneInfo("America/Bahia")
+
+
+def calculate_monetary_drawdown(*args, **kwargs):
+    """Invoke the public calculator with the fixture's configured timezone."""
+    return _calculate_monetary_drawdown(
+        *args, analysis_timezone=ANALYSIS_TIMEZONE, **kwargs
+    )
+
+
+def calculate_percentage_drawdown(*args, **kwargs):
+    """Invoke the public calculator with the fixture's configured timezone."""
+    return _calculate_percentage_drawdown(
+        *args, analysis_timezone=ANALYSIS_TIMEZONE, **kwargs
+    )
 
 
 class PercentageDrawdownTests(unittest.TestCase):

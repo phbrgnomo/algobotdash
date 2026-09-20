@@ -12,13 +12,13 @@ P&L é a soma do resultado líquido informado nas posições. Taxa de acerto é 
 
 Sharpe e Sortino por posição usam o P&L monetário líquido, sem anualização. As variantes diárias usam o retorno diário da amostra filtrada: P&L das posições encerradas no dia dividido pelo saldo de abertura ajustado. Esse saldo é o capital contábil após o primeiro lançamento cujo comentário é exatamente `Ajuste de Saldo` e antes dos resultados operacionais do dia. Empates de instante usam o menor identificador numérico da transação, com ordem textual determinística para identificadores não numéricos. Quando o ajuste aparece depois de operações, P&L, comissão, taxa e swap das transações globais anteriores são descontados para reconstruir a referência de abertura. Ajustes posteriores não redefinem o denominador. Ajustes contábeis não são performance e não compõem o P&L. Não existe capital inicial informado manualmente.
 
-As séries diárias usam `America/Bahia`, preenchem dias úteis sem encerramentos com retorno zero e excluem sábados e domingos; feriados não são modelados. Saldo positivo é obrigatório nos dias com posições filtradas encerradas, mas não nos dias preenchidos com zero. Sharpe usa desvio-padrão amostral, taxa livre de risco zero e pelo menos duas observações. Sortino usa retorno mínimo aceitável zero e downside deviation sobre todas as observações, representando retornos não negativos por zero. A variante anualizada multiplica a razão diária por `sqrt(252)` e requer pelo menos 30 dias úteis.
+As séries diárias usam o fuso analítico IANA obrigatório no YAML (`America/Bahia` é o exemplo recomendado), preenchem dias úteis sem encerramentos com retorno zero e excluem sábados e domingos; feriados não são modelados. Saldo positivo é obrigatório nos dias com posições filtradas encerradas, mas não nos dias preenchidos com zero. Sharpe usa desvio-padrão amostral, taxa livre de risco zero e pelo menos duas observações. Sortino usa retorno mínimo aceitável zero e downside deviation sobre todas as observações, representando retornos não negativos por zero. A variante anualizada multiplica a razão diária por `sqrt(252)` e requer pelo menos 30 dias úteis.
 
 O drawdown monetário é calculado sobre o P&L cumulativo das posições filtradas. O drawdown percentual usa um índice de performance iniciado em 100 e encadeado pelos retornos diários, evitando que ajustes contábeis sejam confundidos com performance. Os episódios de maior profundidade e maior duração são reportados separadamente, com pico, vale e recuperação; episódios não recuperados usam o fim da amostra como limite de duração e mantêm a recuperação nula. Valores percentuais não são limitados artificialmente a 100%.
 
 ## Episódios monetários (Issue #16)
 
-A curva começa em zero na meia-noite de `effective_date_from` em `America/Bahia`.
+A curva começa em zero na meia-noite de `effective_date_from` no fuso analítico configurado.
 Os limites efetivos seguem a mesma resolução das métricas temporais, inclusive quando
 os filtros de data são omitidos. Encerramentos no mesmo instante são agregados em UTC
 antes de atualizar a curva. A soma usa a representação decimal dos valores monetários
@@ -27,7 +27,7 @@ arredondamento para centavos no cálculo.
 
 Um episódio começa abaixo do pico e termina ao atingir ou superar esse pico.
 Picos e vales iguais preservam a primeira ocorrência. `depth` é negativo, calculado
-como vale menos pico. `duration_days` é a diferença entre datas civis em Bahia,
+como vale menos pico. `duration_days` é a diferença entre datas civis no fuso analítico,
 sem adicionar um dia: episódios intradiários podem durar zero dias. Para episódios
 abertos, o limite é `effective_date_to`, mesmo sem operações nessa data.
 
@@ -48,7 +48,7 @@ de episódios do monetário. `depth` é a razão negativa `índice / pico - 1`, 
 arredondamento na API; `-0.25` é exibido como `-25,00%`. Os seletores de profundidade
 e duração são independentes e preservam as primeiras ocorrências nos empates.
 
-O índice interno parte de 100 na meia-noite de `effective_date_from` em Bahia.
+O índice interno parte de 100 na meia-noite de `effective_date_from` no fuso analítico configurado.
 Para cada dia útil, soma-se exatamente o P&L dos fechamentos filtrados e calcula-se
 `r = P&L diário / saldo global de abertura ajustado`; o índice passa a
 `índice anterior × (1 + r)`. As operações usam `Fraction` sobre representações
@@ -61,7 +61,7 @@ O pico inclui o valor inicial positivo de 100. Um índice negativo é permitido 
 continua sendo multiplicado pelos fatores diários; um índice exatamente zero
 permanece zero. Não há clamp, reinício ou recuperação artificial. Episódios se
 recuperam ao atingir ou superar o pico; picos e vales iguais conservam a primeira
-ocorrência. Duração segue as datas civis em Bahia, com episódios abertos limitados
+ocorrência. Duração segue as datas civis no fuso analítico, com episódios abertos limitados
 por `effective_date_to` e `recovery_at` nulo.
 
 `status=open` prevalece e retorna `unavailable` com
@@ -78,6 +78,10 @@ O dashboard usa dois cartões percentuais adicionais na mesma requisição de m�
 sob o controle de geração de filtros já existente. Ausência do campo no backend
 é informada apenas nos cartões percentuais, preservando os monetários. Falhas de
 cobertura ou de cálculo percentual também não invalidam o drawdown monetário.
+
+## Fuso e publicação da projeção
+
+O `timezone` é obrigatório no YAML e vale para toda a análise: interpretação de datas sem offset no workbook, filtros, saldo de abertura, série diária, drawdown e renderização. A projeção persistida registra o fuso e uma revisão única por publicação atômica. Se o fuso configurado divergir do registrado, a API recusa a projeção até que o workbook seja reconstruído; a revisão também permite ao dashboard recarregar seus dados quando uma reconstrução mantém o mesmo hash da fonte.
 
 ## Consequências
 

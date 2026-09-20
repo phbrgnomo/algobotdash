@@ -11,8 +11,6 @@ from fractions import Fraction
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
-METRIC_TIMEZONE = ZoneInfo("America/Bahia")
-
 
 class DrawdownEpisode(TypedDict):
     """Public episode shared by depth and duration selectors."""
@@ -53,22 +51,26 @@ class _DrawdownValley:
         if depth < self.depth:
             self.valley_at, self.depth = at, depth
 
-    def serialize(self, end: date, recovery_at: datetime | None = None) -> DrawdownEpisode:
+    def serialize(
+        self, end: date, analysis_timezone: ZoneInfo,
+        recovery_at: datetime | None = None,
+    ) -> DrawdownEpisode:
         """Close duration at recovery or the effective period's final civil day."""
         return {
             "depth": float(self.depth),
             "peak_at": _utc_iso(self.peak_at),
             "valley_at": _utc_iso(self.valley_at),
             "recovery_at": _utc_iso(recovery_at) if recovery_at is not None else None,
-            "duration_days": (end - self.peak_at.astimezone(METRIC_TIMEZONE).date()).days,
+            "duration_days": (end - self.peak_at.astimezone(analysis_timezone).date()).days,
         }
 
 
 def _monetary_depths(
     events: Sequence[tuple[datetime, float | Fraction]], start: date,
+    analysis_timezone: ZoneInfo,
 ) -> Iterator[tuple[datetime, datetime, Fraction]]:
     """Yield exact depths against the earliest peak, rejecting numeric overflow."""
-    peak_at = datetime.combine(start, time.min, METRIC_TIMEZONE)
+    peak_at = datetime.combine(start, time.min, analysis_timezone)
     peak = cumulative = Fraction(0)
     for at, pnl in events:
         # Decimal text preserves monetary equality without rounding to cents.
@@ -83,13 +85,17 @@ def _monetary_depths(
 
 def _monetary_episodes(
     events: Sequence[tuple[datetime, float | Fraction]], period: tuple[date, date],
+    analysis_timezone: ZoneInfo,
 ) -> list[tuple[Fraction, DrawdownEpisode]]:
     """Collect recovered episodes and finalize any open episode at the period end."""
-    return _drawdown_episodes(_monetary_depths(events, period[0]), period[1])
+    return _drawdown_episodes(
+        _monetary_depths(events, period[0], analysis_timezone), period[1], analysis_timezone
+    )
 
 
 def _drawdown_episodes(
     depths: Iterable[tuple[datetime, datetime, Fraction]], end: date,
+    analysis_timezone: ZoneInfo,
 ) -> list[tuple[Fraction, DrawdownEpisode]]:
     """Collect episodes from exact depths shared by both risk measures."""
     episodes: list[tuple[Fraction, DrawdownEpisode]] = []
@@ -101,11 +107,12 @@ def _drawdown_episodes(
             valley.observe(at, depth)
         elif valley is not None:
             episodes.append((
-                valley.depth, valley.serialize(at.astimezone(METRIC_TIMEZONE).date(), at),
+                valley.depth,
+                valley.serialize(at.astimezone(analysis_timezone).date(), analysis_timezone, at),
             ))
             valley = None
     if valley is not None:
-        episodes.append((valley.depth, valley.serialize(end)))
+        episodes.append((valley.depth, valley.serialize(end, analysis_timezone)))
     return episodes
 
 
@@ -129,6 +136,7 @@ def calculate_monetary_drawdown(
     events: Sequence[tuple[datetime, float | Fraction]],
     *,
     period: tuple[date, date] | None,
+    analysis_timezone: ZoneInfo,
     realized_available: bool = True,
 ) -> MonetaryDrawdown:
     """Scan chronological P&L; reject reversed periods and ambiguous timestamps."""
@@ -142,7 +150,7 @@ def calculate_monetary_drawdown(
         if at.tzinfo is None or at.utcoffset() is None:
             raise ValueError("episode timestamps must be timezone-aware")
     try:
-        episodes = _monetary_episodes(events, period)
+        episodes = _monetary_episodes(events, period, analysis_timezone)
     except (OverflowError, ValueError):
         return _empty_drawdown("unavailable")
     return _select_drawdown(episodes)
@@ -151,15 +159,20 @@ def calculate_monetary_drawdown(
 def _percentage_depths(
     daily_events: Mapping[date, tuple[datetime, Fraction]],
     opening_balances: Mapping[date, float | None], start: date,
+    analysis_timezone: ZoneInfo,
 ) -> Iterator[tuple[datetime, datetime, Fraction]]:
     """Link exact daily returns against a positive, initially 100, high-water mark."""
-    peak_at = datetime.combine(start, time.min, METRIC_TIMEZONE)
+    peak_at = datetime.combine(start, time.min, analysis_timezone)
     peak = index = Fraction(100)
     for day, (at, pnl) in sorted(daily_events.items()):
         balance = opening_balances[day]
-        if balance is None:
-            raise ValueError("missing opening balance")
-        daily_return = pnl / Fraction(str(balance))
+        try:
+            numeric_balance = float(balance) if balance is not None else None
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("invalid opening balance") from exc
+        if numeric_balance is None or not math.isfinite(numeric_balance) or numeric_balance <= 0:
+            raise ValueError("invalid opening balance")
+        daily_return = pnl / Fraction(str(numeric_balance))
         index *= 1 + daily_return
         depth = index / peak - 1
         if not all(math.isfinite(float(value)) for value in (daily_return, index, depth)):
@@ -171,12 +184,13 @@ def _percentage_depths(
 
 def _daily_closed_events(
     events: Sequence[tuple[datetime, float | Fraction]], period: tuple[date, date],
+    analysis_timezone: ZoneInfo,
 ) -> dict[date, tuple[datetime, Fraction]]:
     """Aggregate exact weekday P&L and retain each day's last selected exit."""
     daily_events: dict[date, tuple[datetime, Fraction]] = {}
     for at, pnl in events:
         at = at.astimezone(timezone.utc)
-        day = at.astimezone(METRIC_TIMEZONE).date()
+        day = at.astimezone(analysis_timezone).date()
         if day.weekday() < 5 and period[0] <= day <= period[1]:
             previous_at, previous_pnl = daily_events.get(day, (at, Fraction(0)))
             daily_events[day] = (max(at, previous_at), previous_pnl + Fraction(str(pnl)))
@@ -188,6 +202,7 @@ def calculate_percentage_drawdown(
     opening_balances: Mapping[date, float | None],
     *,
     period: tuple[date, date] | None,
+    analysis_timezone: ZoneInfo,
     realized_available: bool = True,
 ) -> tuple[Drawdown, str | None]:
     """Return daily percentage episodes and an optional unavailability reason."""
@@ -201,12 +216,16 @@ def calculate_percentage_drawdown(
         if at.tzinfo is None or at.utcoffset() is None:
             raise ValueError("episode timestamps must be timezone-aware")
     try:
-        daily_events = _daily_closed_events(events, period)
+        daily_events = _daily_closed_events(events, period, analysis_timezone)
         if any(opening_balances.get(day) is None or (opening_balances[day] or 0) <= 0
                for day in daily_events):
             return _empty_drawdown("unavailable"), "invalid_opening_balance_coverage"
         episodes = _drawdown_episodes(
-            _percentage_depths(daily_events, opening_balances, period[0]), period[1],
+            _percentage_depths(
+                daily_events, opening_balances, period[0], analysis_timezone
+            ),
+            period[1],
+            analysis_timezone,
         )
     except (OverflowError, ValueError):
         return _empty_drawdown("unavailable"), "numeric_overflow"
@@ -363,6 +382,10 @@ def calculate_position_metrics(
         )
     if not pnl_values:
         return _empty_payload(excluded_open_positions)
+    if not all(math.isfinite(value) for value in pnl_values):
+        return _unavailable_payload(
+            len(pnl_values), excluded_open_positions, "numeric_overflow"
+        )
     net_pnl = math.fsum(pnl_values)
     wins = [value for value in pnl_values if value > 0]
     losses = [value for value in pnl_values if value < 0]

@@ -13,10 +13,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import httpx
 
-from algobotdash.metrics import _finite_ratio  # pylint: disable=protected-access
+from algobotdash.metrics import (  # pylint: disable=protected-access
+    _finite_ratio,
+    calculate_position_metrics,
+)
 from algobotdash.storage import SCHEMA, read_positions
 from algobotdash.web import app
 from tests.fixture_helpers import get_asgi, insert_positions, insert_transactions
@@ -40,6 +44,7 @@ class QueryApiTests(unittest.TestCase):
         self.config_path.write_text(
             "\n".join(
                 [
+                    "timezone: America/Bahia",
                     "source:",
                     f"  path: {source_path}",
                     "strategies:",
@@ -144,6 +149,45 @@ class QueryApiTests(unittest.TestCase):
             "recovery_at": "2026-08-04T15:00:00Z", "duration_days": 1,
         })
         self.assertNotIn("percentage_drawdown", payload["unavailable_reasons"])
+
+    def test_percentage_drawdown_publishes_distinct_depth_and_duration_episodes(self):
+        """Expose independent percentage selectors through the HTTP contract."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES "
+                "(1, 'fixture', 'hash', '2026-08-10T12:00:00Z', 3, 3, 0, 0)"
+            )
+            insert_positions(connection, [
+                (str(index), "Turtle", "WIN", "WINQ26", "buy",
+                 "2026-08-03T10:00:00Z", at, "closed", 1, 1, 100, 110,
+                 0, 0, pnl, 1, 1)
+                for index, (at, pnl) in enumerate([
+                    ("2026-08-03T12:00:00Z", -20),
+                    ("2026-08-04T12:00:00Z", 25),
+                    ("2026-08-05T12:00:00Z", -10),
+                ])
+            ])
+            insert_transactions(connection, [
+                (str(index), None, None, None, f"2026-08-0{index + 3}T09:00:00Z",
+                 "", "balance", None, None, 0, 0, 0, 0, 100,
+                 "Ajuste de Saldo", 1)
+                for index in range(3)
+            ])
+
+        response = self._request("/api/metrics?date_from=2026-08-03&date_to=2026-08-10")
+
+        self.assertEqual(response.status_code, 200)
+        risk = response.json()["percentage_drawdown"]
+        self.assertEqual(risk["deepest_episode"], {
+            "depth": -0.2, "peak_at": "2026-08-03T03:00:00Z",
+            "valley_at": "2026-08-03T12:00:00Z",
+            "recovery_at": "2026-08-04T12:00:00Z", "duration_days": 1,
+        })
+        self.assertEqual(risk["longest_episode"], {
+            "depth": -0.1, "peak_at": "2026-08-03T03:00:00Z",
+            "valley_at": "2026-08-05T12:00:00Z",
+            "recovery_at": None, "duration_days": 7,
+        })
 
     def test_percentage_coverage_failure_keeps_monetary_episode(self):
         """Missing global capital only makes the percentage contract unavailable."""
@@ -467,17 +511,42 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(payload["sortino_per_position"], 1)
         self.assertEqual(
             payload["unavailable_reasons"],
+            {"percentage_drawdown": "invalid_opening_balance_coverage"},
+        )
+        self.assertEqual(
+            payload["temporal_unavailable_reasons"],
             dict.fromkeys(
-                (
-                    "percentage_drawdown",
-                    "sharpe_daily",
-                    "sortino_daily",
-                    "sharpe_annualized",
-                    "sortino_annualized",
-                ),
+                ("sharpe_daily", "sortino_daily", "sharpe_annualized", "sortino_annualized"),
                 "invalid_opening_balance_coverage",
             ),
         )
+
+    def test_position_metrics_reject_non_finite_direct_inputs(self) -> None:
+        """Direct callers receive a JSON-safe unavailable payload for bad P&L."""
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(value=value):
+                payload = calculate_position_metrics(
+                    [100.0, value], excluded_open_positions=2
+                )
+                self.assertEqual(payload["sample_size"], 2)
+                self.assertEqual(payload["excluded_open_positions"], 2)
+                self.assertTrue(all(metric is None for metric in (
+                    payload["net_pnl"], payload["gross_profit"], payload["gross_loss"],
+                    payload["win_rate"], payload["profit_factor"], payload["payoff"],
+                    payload["expectancy"], payload["sharpe_per_position"],
+                    payload["sortino_per_position"],
+                )))
+                self.assertEqual(
+                    payload["unavailable_reasons"],
+                    dict.fromkeys(
+                        (
+                            "net_pnl", "gross_profit", "gross_loss", "winning_trades",
+                            "losing_trades", "win_rate", "profit_factor", "payoff",
+                            "expectancy", "sharpe_per_position", "sortino_per_position",
+                        ),
+                        "numeric_overflow",
+                    ),
+                )
 
     def test_metrics_calculate_daily_ratios_from_adjusted_opening_balance(self) -> None:
         """Use filtered Bahia days and the first global accounting adjustment."""
@@ -549,7 +618,7 @@ class QueryApiTests(unittest.TestCase):
         self.assertAlmostEqual(payload["sortino_daily"], 2.1213203435596424)
         self.assertIsNone(payload["sharpe_annualized"])
         self.assertEqual(
-            payload["unavailable_reasons"]["sharpe_annualized"],
+            payload["temporal_unavailable_reasons"]["sharpe_annualized"],
             "insufficient_annualized_sample",
         )
 
@@ -606,7 +675,7 @@ class QueryApiTests(unittest.TestCase):
             with self.subTest(metric=metric):
                 self.assertIsNone(payload[metric])
                 self.assertEqual(
-                    payload["unavailable_reasons"][metric],
+                    payload["temporal_unavailable_reasons"][metric],
                     "invalid_opening_balance_coverage",
                 )
 
@@ -623,11 +692,11 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(payload["daily_observation_days"], 5)
         self.assertEqual(payload["opening_balance_required_days"], 0)
         self.assertEqual(
-            payload["unavailable_reasons"]["sharpe_daily"],
+            payload["temporal_unavailable_reasons"]["sharpe_daily"],
             "zero_standard_deviation",
         )
         self.assertEqual(
-            payload["unavailable_reasons"]["sortino_daily"],
+            payload["temporal_unavailable_reasons"]["sortino_daily"],
             "zero_downside_deviation",
         )
 
@@ -655,7 +724,7 @@ class QueryApiTests(unittest.TestCase):
         self.assertIsNone(after_history["effective_date_to"])
         self.assertEqual(after_history["daily_observation_days"], 0)
         self.assertEqual(
-            after_history["unavailable_reasons"]["sharpe_daily"], "empty_sample"
+            after_history["temporal_unavailable_reasons"]["sharpe_daily"], "empty_sample"
         )
 
     def test_metrics_annualize_a_thirty_weekday_sample(self) -> None:
@@ -707,10 +776,22 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(from_payload["effective_date_to"], "2026-09-11")
         self.assertEqual(from_payload["daily_observation_days"], 29)
         self.assertEqual(from_payload["opening_balance_required_days"], 1)
+        for metric in ("sharpe_annualized", "sortino_annualized"):
+            self.assertIsNone(from_payload[metric])
+            self.assertEqual(
+                from_payload["temporal_unavailable_reasons"][metric],
+                "insufficient_annualized_sample",
+            )
         self.assertEqual(to_payload["effective_date_from"], "2026-08-03")
         self.assertEqual(to_payload["effective_date_to"], "2026-09-10")
         self.assertEqual(to_payload["daily_observation_days"], 29)
         self.assertEqual(to_payload["opening_balance_required_days"], 1)
+        for metric in ("sharpe_annualized", "sortino_annualized"):
+            self.assertIsNone(to_payload[metric])
+            self.assertEqual(
+                to_payload["temporal_unavailable_reasons"][metric],
+                "insufficient_annualized_sample",
+            )
 
     def test_metrics_isolate_temporal_numeric_overflow(self) -> None:
         """Keep position totals when daily returns exceed numeric representation."""
@@ -758,7 +839,8 @@ class QueryApiTests(unittest.TestCase):
             with self.subTest(metric=metric):
                 self.assertIsNone(response.json()[metric])
                 self.assertEqual(
-                    response.json()["unavailable_reasons"][metric], "numeric_overflow"
+                    response.json()["temporal_unavailable_reasons"][metric],
+                    "numeric_overflow",
                 )
 
     def test_metrics_keep_empty_realized_sums_available(self) -> None:
@@ -782,7 +864,13 @@ class QueryApiTests(unittest.TestCase):
         ):
             with self.subTest(metric=metric):
                 self.assertIsNone(payload[metric])
-                self.assertEqual(payload["unavailable_reasons"][metric], "empty_sample")
+                reasons = (
+                    payload["temporal_unavailable_reasons"]
+                    if metric.startswith(("sharpe_daily", "sortino_daily"))
+                    or metric.endswith("annualized")
+                    else payload["unavailable_reasons"]
+                )
+                self.assertEqual(reasons[metric], "empty_sample")
 
     def test_metrics_explain_absent_losses_and_downside(self) -> None:
         """Return finite values and stable reasons when no outcome is negative."""
@@ -908,9 +996,13 @@ class QueryApiTests(unittest.TestCase):
         """Count excluded opens for all and make open metrics unavailable."""
         self._seed_projection()
 
+        closed_positions = self._request("/api/metrics")
         all_positions = self._request("/api/metrics?status=all")
         open_positions = self._request("/api/metrics?status=open")
 
+        self._assert_metric_counts(
+            closed_positions, sample_size=2, excluded_open_positions=1,
+        )
         all_payload = self._assert_metric_counts(
             all_positions, sample_size=2, excluded_open_positions=1,
         )
@@ -1212,6 +1304,13 @@ class QueryApiTests(unittest.TestCase):
                 self.assertEqual(response.json()["detail"][0]["type"], "literal_error")
                 self.assertEqual(response.json()["detail"][0]["loc"], ["query", field])
 
+        for endpoint in ("/api/metrics", "/api/positions"):
+            for field, value in (("date_from", "not-a-date"), ("date_to", "2026-02-30")):
+                with self.subTest(endpoint=endpoint, field=field):
+                    response = self._request(f"{endpoint}?{field}={value}")
+                    self.assertEqual(response.status_code, 422)
+                    self.assertEqual(response.json()["detail"][0]["loc"], ["query", field])
+
     def test_metrics_reject_malformed_projection(self) -> None:
         """Expose the stable projection error instead of partial metrics."""
         self.database_path.write_bytes(b"not a sqlite database")
@@ -1402,6 +1501,7 @@ class QueryApiTests(unittest.TestCase):
                 offset=0,
                 sort_by="opened_at",
                 sort_order="DESC; DROP TABLE positions",
+                analysis_timezone=ZoneInfo("America/Bahia"),
             )
 
     def test_realized_pnl_sort_uses_the_exposed_realized_value(self) -> None:
@@ -1452,6 +1552,67 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(status.json()["state"], "ready")
         self.assertEqual(status.json()["source_name"], "ReportHistory.xlsx")
         self.assertEqual(status.json()["last_import"]["source_hash"], "new-hash")
+        self.assertEqual(status.json()["timezone"], "America/Bahia")
+        self.assertEqual(status.json()["projection_revision"], "fixture")
+
+    def test_timezone_change_requires_rebuild_and_changes_civil_dates(self) -> None:
+        """Reject stale timestamps and use the rebuilt projection's civil calendar."""
+        with self._projection() as connection:
+            connection.execute(
+                "INSERT INTO imports VALUES "
+                "(1, 'fixture', 'hash', '2026-08-02T12:00:00Z', 1, 1, 0, 0)"
+            )
+            insert_positions(connection, [
+                ("midnight", "Turtle", "WIN", "WINQ26", "buy",
+                 "2026-08-02T00:30:00Z", "2026-08-02T01:30:00Z", "closed",
+                 1, 1, 100, 110, 0, 0, -10, 1, 1),
+            ])
+
+        bahia = self._request("/api/metrics?date_from=2026-08-01&date_to=2026-08-01")
+        self.assertEqual(bahia.status_code, 200)
+        self.assertEqual(bahia.json()["sample_size"], 1)
+        self.assertEqual(
+            bahia.json()["monetary_drawdown"]["deepest_episode"]["peak_at"],
+            "2026-08-01T03:00:00Z",
+        )
+
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace(
+                "America/Bahia", "Pacific/Kiritimati"
+            ),
+            encoding="utf-8",
+        )
+        stale = self._request("/api/positions?date_from=2026-08-02&date_to=2026-08-02")
+        self.assertEqual(stale.status_code, 503)
+        self.assertEqual(stale.json()["detail"]["code"], "projection_unavailable")
+        self.assertEqual(self._request("/api/status").json()["state"], "unavailable")
+
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute(
+                "UPDATE projection_metadata SET revision = 'rebuilt', "
+                "timezone = 'Pacific/Kiritimati'"
+            )
+        rebuilt = self._request("/api/metrics?date_from=2026-08-02&date_to=2026-08-02")
+        self.assertEqual(rebuilt.status_code, 200)
+        self.assertEqual(rebuilt.json()["sample_size"], 1)
+        self.assertEqual(
+            rebuilt.json()["monetary_drawdown"]["deepest_episode"]["peak_at"],
+            "2026-08-01T10:00:00Z",
+        )
+
+    def test_blank_projection_metadata_is_unavailable_independently_of_timezone(self) -> None:
+        """Reject corrupt publication metadata even when its timezone still matches."""
+        self._seed_projection()
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute("UPDATE projection_metadata SET revision = ''")
+
+        positions = self._request("/api/positions")
+        status = self._request("/api/status")
+
+        self.assertEqual(positions.status_code, 503)
+        self.assertEqual(positions.json()["detail"]["code"], "projection_unavailable")
+        self.assertEqual(status.json()["state"], "unavailable")
+        self.assertEqual(status.json()["projection"], "invalid")
 
     def test_status_is_empty_without_import_and_queries_report_unavailable_projection(self) -> None:
         """Keep status readable while rejecting queries without a projection."""

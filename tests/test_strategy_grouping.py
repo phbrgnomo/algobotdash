@@ -26,7 +26,7 @@ class StrategyGroupingTests(unittest.TestCase):
         self.config_path = self.tmp_path / "config.yaml"
         self.database_path = self.tmp_path / "algobotdash.sqlite"
         self.config_path.write_text(
-            "source:\n  path: ReportHistory.xlsx\nstrategies:\n  groups:\n"
+            "timezone: America/Bahia\nsource:\n  path: ReportHistory.xlsx\nstrategies:\n  groups:\n"
             "    - name: FVG\n      patterns: ['fvg']\n",
             encoding="utf-8",
         )

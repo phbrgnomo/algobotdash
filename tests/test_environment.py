@@ -81,7 +81,9 @@ class EnvironmentTests(unittest.TestCase):
             database = directory / "algobotdash.sqlite"
             environment_path = directory / ".env"
             workbook(source)
-            _ = config.write_text(f"source:\n  path: {source}\n", encoding="utf-8")
+            _ = config.write_text(
+                f"timezone: America/Bahia\nsource:\n  path: {source}\n", encoding="utf-8"
+            )
             _ = environment_path.write_text(
                 f"ALGOBOTDASH_CONFIG={config}\nALGOBOTDASH_DATABASE={database}\n",
                 encoding="utf-8",

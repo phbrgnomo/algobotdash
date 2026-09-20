@@ -60,7 +60,7 @@ class LegacyReportTests(unittest.TestCase):
             output = directory / "reports"
             workbook(source, legacy_report=True)
             config_path.write_text(
-                f"source:\n  path: {source}\n",
+                f"timezone: America/Bahia\nsource:\n  path: {source}\n",
                 encoding="utf-8",
             )
 

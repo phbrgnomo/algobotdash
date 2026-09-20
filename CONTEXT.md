@@ -91,7 +91,7 @@ Agrupamento definido no arquivo YAML de configuração para comentários que rep
 _Avoid_: perna de estratégia
 
 **Configuração de agrupamento**:
-Arquivo YAML local que define como comentários e símbolos são normalizados. É a fonte canônica dessa regra no MVP.
+Arquivo YAML local que define como comentários e símbolos são normalizados, além do fuso analítico. É a fonte canônica dessas regras no MVP.
 _Avoid_: configuração editada pelo dashboard
 
 **Símbolo normalizado**:
@@ -115,8 +115,12 @@ Resultados calculados sobre todas as posições analíticas realizadas que atend
 _Avoid_: excluir resultado não classificado do total, atribuir estratégia sem vínculo comprovado
 
 **Data analítica**:
-Data de saída de uma posição realizada e data de entrada de uma posição aberta; é a referência usada pelo filtro de período.
+Data civil no fuso analítico configurado: saída de uma posição realizada e entrada de uma posição aberta; é a referência usada pelo filtro de período.
 _Avoid_: misturar data de entrada e data de saída sem declarar a convenção
+
+**Fuso analítico**:
+Identificador IANA obrigatório no YAML que interpreta timestamps sem offset e define filtros, saldos de abertura, séries temporais, drawdowns e datas exibidas. Uma projeção construída sob outro fuso é indisponível até reconstrução.
+_Avoid_: usar o fuso do navegador, assumir um fallback implícito ou reutilizar uma projeção com fuso incompatível
 
 **Posição aberta**:
 Posição que possui entrada sem saída correspondente no relatório; permanece rastreável, mas não entra nas métricas realizadas além do P&L explicitamente informado pela fonte.

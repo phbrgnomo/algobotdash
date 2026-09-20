@@ -7,6 +7,8 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from openpyxl import load_workbook
@@ -26,6 +28,7 @@ def config(source: Path) -> ImportConfig:
     """Build the standard configuration used by parser tests."""
     return ImportConfig(
         source_path=source,
+        timezone=ZoneInfo("America/Bahia"),
         symbol_prefixes=(("WIN", "WIN"), ("WDO", "WDO")),
         strategy_groups=(
             StrategyGroup("Turtle", ("turtle",)),
@@ -308,11 +311,43 @@ class ImportPipelineTests(unittest.TestCase):
         """Configuration should prefer the most specific symbol prefix."""
         configured = ImportConfig(
             source_path=Path("history.xlsx"),
+            timezone=ZoneInfo("America/Bahia"),
             symbol_prefixes=(("W", "W"), ("WIN", "WIN")),
             strategy_groups=(),
         )
 
         self.assertEqual(configured.normalize_symbol("WIN$"), "WIN")
+
+    def test_configuration_requires_a_valid_iana_timezone(self) -> None:
+        """Timezone is mandatory because it defines the complete analytical calendar."""
+        for index, (value, message) in enumerate(
+            (
+                (None, "não vazia"),
+                ("", "não vazia"),
+                ("   ", "não vazia"),
+                ("Not/AZone", "IANA inválido"),
+            )
+        ):
+            with self.subTest(value=value):
+                path = self.tmp_path / f"timezone-{index}.yml"
+                prefix = "" if value is None else f"timezone: {value}\n"
+                path.write_text(
+                    prefix + "source:\n  path: history.xlsx\n", encoding="utf-8"
+                )
+                with self.assertRaisesRegex(ConfigurationError, message):
+                    load_config(path)
+
+    def test_configuration_wraps_zoneinfo_value_error(self) -> None:
+        """ZoneInfo implementation failures preserve the public config error."""
+        path = self.tmp_path / "timezone-value-error.yml"
+        path.write_text(
+            "timezone: America/Bahia\nsource:\n  path: history.xlsx\n",
+            encoding="utf-8",
+        )
+
+        with patch("algobotdash.config.ZoneInfo", side_effect=ValueError("invalid")):
+            with self.assertRaisesRegex(ConfigurationError, "IANA inválido"):
+                load_config(path)
 
 
     def test_configuration_rejects_invalid_patterns(self) -> None:
@@ -321,7 +356,8 @@ class ImportPipelineTests(unittest.TestCase):
             with self.subTest(patterns=patterns):
                 path = self.tmp_path / "config.yml"
                 path.write_text(
-                    "source:\n  path: history.xlsx\nstrategies:\n  groups:\n"
+                    "timezone: America/Bahia\nsource:\n  path: history.xlsx\n"
+                    "strategies:\n  groups:\n"
                     f"    - name: Turtle\n      patterns: {patterns!r}\n",
                     encoding="utf-8",
                 )
@@ -334,7 +370,8 @@ class ImportPipelineTests(unittest.TestCase):
         """Configuration should reject empty symbol prefixes."""
         path = self.tmp_path / "config.yml"
         path.write_text(
-            "source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    '': Unknown\n",
+            "timezone: America/Bahia\nsource:\n  path: history.xlsx\n"
+            "symbols:\n  prefixes:\n    '': Unknown\n",
             encoding="utf-8",
         )
 
@@ -346,7 +383,8 @@ class ImportPipelineTests(unittest.TestCase):
         """A symbol prefix must map to a non-blank analytical family."""
         path = self.tmp_path / "config.yml"
         path.write_text(
-            "source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    WIN: '   '\n",
+            "timezone: America/Bahia\nsource:\n  path: history.xlsx\n"
+            "symbols:\n  prefixes:\n    WIN: '   '\n",
             encoding="utf-8",
         )
 
@@ -359,7 +397,8 @@ class ImportPipelineTests(unittest.TestCase):
             with self.subTest(prefixes=prefixes):
                 path = self.tmp_path / "config.yml"
                 path.write_text(
-                    f"source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    {prefixes}\n",
+                    "timezone: America/Bahia\nsource:\n  path: history.xlsx\n"
+                    f"symbols:\n  prefixes:\n    {prefixes}\n",
                     encoding="utf-8",
                 )
 
@@ -371,7 +410,7 @@ class ImportPipelineTests(unittest.TestCase):
         """A strategy group must have a non-blank name."""
         path = self.tmp_path / "config.yml"
         path.write_text(
-            "source:\n  path: history.xlsx\nstrategies:\n  groups:\n"
+            "timezone: America/Bahia\nsource:\n  path: history.xlsx\nstrategies:\n  groups:\n"
             "    - name: '   '\n      patterns: ['fvg']\n",
             encoding="utf-8",
         )
@@ -409,7 +448,7 @@ class ImportPipelineTests(unittest.TestCase):
         for section, value, message in cases:
             with self.subTest(section=section, value=value):
                 path = self.tmp_path / f"{section}-{len(value)}.yml"
-                prefix = "source:\n  path: history.xlsx\n"
+                prefix = "timezone: America/Bahia\nsource:\n  path: history.xlsx\n"
                 path.write_text(f"{prefix}{section}: {value}\n", encoding="utf-8")
                 with self.assertRaisesRegex(ConfigurationError, message):
                     load_config(path)
@@ -496,6 +535,29 @@ class ImportPipelineTests(unittest.TestCase):
             "Turtle",
         )
         connection.close()
+
+    def test_refresh_same_source_publishes_a_new_projection_revision(self) -> None:
+        """A rebuilt projection must invalidate dashboard data even with the same hash."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "trades.sqlite"
+        workbook(source)
+
+        ImportService(config(source)).refresh(database)
+        with sqlite3.connect(database) as connection:
+            first_revision, first_timezone = connection.execute(
+                "SELECT revision, timezone FROM projection_metadata WHERE id = 1"
+            ).fetchone()
+
+        ImportService(config(source)).refresh(database)
+        with sqlite3.connect(database) as connection:
+            second_revision, second_timezone = connection.execute(
+                "SELECT revision, timezone FROM projection_metadata WHERE id = 1"
+            ).fetchone()
+            import_count = connection.execute("SELECT COUNT(*) FROM imports").fetchone()[0]
+
+        self.assertNotEqual(first_revision, second_revision)
+        self.assertEqual((first_timezone, second_timezone), ("America/Bahia", "America/Bahia"))
+        self.assertEqual(import_count, 1)
 
 
     def test_refresh_rebuilds_previous_shape_without_schema_migration(self) -> None:

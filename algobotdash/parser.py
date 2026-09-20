@@ -5,16 +5,13 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
 
 from .config import ImportConfig
-
-REPORT_TZ = ZoneInfo("America/Bahia")
 
 
 @dataclass(frozen=True)
@@ -118,14 +115,14 @@ def _volume_pair(value: Any) -> tuple[float | None, float | None]:
     return _number(parts[0]), _number(parts[1])
 
 
-def _datetime(value: Any) -> datetime | None:
+def _datetime(value: Any, timezone: tzinfo) -> datetime | None:
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=REPORT_TZ)
+        return value if value.tzinfo else value.replace(tzinfo=timezone)
     if not value:
         return None
     for fmt in ("%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M"):
         try:
-            return datetime.strptime(str(value).strip(), fmt).replace(tzinfo=REPORT_TZ)
+            return datetime.strptime(str(value).strip(), fmt).replace(tzinfo=timezone)
         except ValueError:
             continue
     return None
@@ -258,7 +255,7 @@ def _parse_positions(
         symbol = str(_cell(row, 2) or "").strip()
         if all(value in (None, "") for value in row):
             continue
-        entry_at = _datetime(_cell(row, 0))
+        entry_at = _datetime(_cell(row, 0), config.timezone)
         pnl = _number(_cell(row, 12))
         if not position_id or not entry_at or not symbol or pnl is None:
             rejected.append(
@@ -268,7 +265,7 @@ def _parse_positions(
         comment = ""
         strategy = None
         volume_requested, volume_executed = _volume_pair(_cell(row, 4))
-        exit_at = _datetime(_cell(row, 8))
+        exit_at = _datetime(_cell(row, 8), config.timezone)
         records.append(
             PositionRecord(
                 position_id,
@@ -301,7 +298,7 @@ def _parse_orders(
     rejected: list[RejectedRecord] = []
     for row_number, row in rows:
         order_id = str(_cell(row, 1) or "").strip()
-        opened_at = _datetime(_cell(row, 0))
+        opened_at = _datetime(_cell(row, 0), config.timezone)
         symbol = str(_cell(row, 2) or "").strip()
         if not order_id or not opened_at or not symbol:
             if any(value not in (None, "") for value in row):
@@ -325,7 +322,7 @@ def _parse_orders(
                 _number(_cell(row, 5)),
                 _number(_cell(row, 6)),
                 _number(_cell(row, 7)),
-                _datetime(_cell(row, 8)),
+                _datetime(_cell(row, 8), config.timezone),
                 str(_cell(row, 9) or "").strip().lower(),
                 comment,
                 None,
@@ -378,13 +375,14 @@ def _invalid_transaction_numeric_fields(
 
 
 def _parse_transactions(
-    rows: Iterable[tuple[int, tuple[Any, ...]]], order_strategies: dict[str, str | None]
+    rows: Iterable[tuple[int, tuple[Any, ...]]], order_strategies: dict[str, str | None],
+    config: ImportConfig,
 ) -> tuple[list[TransactionRecord], list[RejectedRecord]]:
     transactions: list[TransactionRecord] = []
     rejected: list[RejectedRecord] = []
     for row_number, row in rows:
         transaction_id = str(_cell(row, 1) or "").strip()
-        at = _datetime(_cell(row, 0))
+        at = _datetime(_cell(row, 0), config.timezone)
         order_id = str(_cell(row, 7) or "").strip()
         if not transaction_id and not at:
             continue
@@ -446,7 +444,9 @@ def read_report(
     positions, rejected_positions = _parse_positions(position_rows, config)
     orders, order_strategies, rejected_orders = _parse_orders(order_rows, config)
     positions = _associate_position_strategies(positions, orders)
-    transactions, rejected_transactions = _parse_transactions(transaction_rows, order_strategies)
+    transactions, rejected_transactions = _parse_transactions(
+        transaction_rows, order_strategies, config
+    )
     rejected = rejected_positions + rejected_orders + rejected_transactions
     return (
         positions,

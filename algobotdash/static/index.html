@@ -162,6 +162,7 @@
       const dateTo = document.querySelector("#date-to");
       let latestImportKey = null;
       let latestFilterImportKey = null;
+      let analysisTimezone = null;
       let positionRequestGeneration = 0;
       let metricRequestGeneration = 0;
       let statusRequestGeneration = 0;
@@ -174,7 +175,11 @@
       }
 
       function formatDate(value) {
-        return value ? new Date(value).toLocaleString("pt-BR") : "—";
+        return value && analysisTimezone
+          ? new Intl.DateTimeFormat("pt-BR", {
+              dateStyle: "short", timeStyle: "medium", timeZone: analysisTimezone,
+            }).format(new Date(value))
+          : "—";
       }
 
       function formatPnl(value) {
@@ -232,11 +237,13 @@
 
       function renderMetrics(data) {
         renderDrawdown(data);
+        const positionReasons = data.unavailable_reasons || {};
+        const temporalReasons = data.temporal_unavailable_reasons || {};
         Object.entries(metricIds).forEach(([name, selector]) => {
           const element = document.querySelector(selector);
           element.textContent = formatMetric(name, data[name]);
-          const reason = data.unavailable_reasons[name]
-            ? metricReasonLabels[data.unavailable_reasons[name]] : "";
+          const reasons = temporalReasonIds[name] ? temporalReasons : positionReasons;
+          const reason = reasons[name] ? metricReasonLabels[reasons[name]] : "";
           element.title = reason;
           if (temporalReasonIds[name]) {
             document.querySelector(temporalReasonIds[name]).textContent = reason;
@@ -266,7 +273,7 @@
             + `${data.opening_balance_required_days} dias com encerramentos.`
             + period + missing + nonPositive;
         }
-        const reasons = [...new Set(Object.values(data.unavailable_reasons))]
+        const reasons = [...new Set(Object.values(positionReasons))]
           .map((reason) => metricReasonLabels[reason] || reason);
         setNotice("#metrics-state", reasons.join(" "), reasons.length > 0);
       }
@@ -305,6 +312,10 @@
         renderDrawdownCards(data, "percentage_drawdown", "risk-percentage", "percentage_depth");
       }
 
+      function formatDuration(days) {
+        return `${days} ${days === 1 ? "dia" : "dias"}`;
+      }
+
       function renderDrawdownCards(data, field, prefix, depthFormat) {
         const risk = data[field];
         if (!risk || risk.state !== "available") {
@@ -316,19 +327,17 @@
               || "Drawdown indisponível.");
           return;
         }
-        const dateLabel = (value) => value ? new Date(value).toLocaleString("pt-BR", {
-          timeZone: "America/Bahia",
-        }) : "—";
+        const dateLabel = formatDate;
         for (const name of ["deepest", "longest"]) {
           const episode = risk[`${name}_episode`];
           document.querySelector(`#${prefix}-${name}`).textContent = name === "deepest"
-            ? formatMetric(depthFormat, episode.depth) : `${episode.duration_days} dias`;
+            ? formatMetric(depthFormat, episode.depth) : formatDuration(episode.duration_days);
           document.querySelector(`#${prefix}-${name}-detail`).textContent =
-            `${name === "deepest" ? `${episode.duration_days} dias` : formatMetric(depthFormat, episode.depth)}; `
+            `${name === "deepest" ? formatDuration(episode.duration_days) : formatMetric(depthFormat, episode.depth)}; `
             + `Pico: ${dateLabel(episode.peak_at)}; Vale: ${dateLabel(episode.valley_at)}; `
             + `Recuperação: ${dateLabel(episode.recovery_at)}`
             + (episode.recovery_at === null ? "; Em andamento" : "")
-            + ". Datas em America/Bahia.";
+            + `. Datas em ${analysisTimezone}.`;
         }
       }
 
@@ -339,6 +348,7 @@
       }
 
       function renderStatus(data) {
+        analysisTimezone = data.timezone;
         const service = document.querySelector("#service");
         service.textContent = label(data.state);
         service.className = data.state === "ready" ? "ok" : data.state === "empty" ? "warn" : "error";
@@ -350,7 +360,7 @@
         document.querySelector("#source-name").textContent = data.source_name || "—";
         document.querySelector("#source-hash").textContent = data.last_import?.source_hash || "—";
         document.querySelector("#last-imported-at").textContent = formatDate(data.last_import?.imported_at);
-        document.querySelector("#updated-at").textContent = `Atualizado em ${new Date().toLocaleTimeString("pt-BR")}`;
+        document.querySelector("#updated-at").textContent = `Atualizado em ${formatDate(new Date().toISOString())}`;
       }
 
       function renderPositions(data) {
@@ -552,7 +562,7 @@
           if (requestGeneration !== statusRequestGeneration) return;
           renderStatus(data);
           setNotice("#error", "", false);
-          const importKey = data.last_import?.source_hash || null;
+          const importKey = data.projection_revision || null;
           if (data.state === "ready") {
             if (importKey !== latestFilterImportKey) {
               const filtersLoaded = await loadFilterOptions();

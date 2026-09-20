@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -25,9 +26,9 @@ POSITION_SORT_COLUMNS = {
     "status": "status",
 }
 SORT_ORDERS = {"asc": "ASC", "desc": "DESC"}
-REPORT_TZ = ZoneInfo("America/Bahia")
 
 REQUIRED_TABLE_COLUMNS = {
+    "projection_metadata": {"id", "revision", "timezone"},
     "imports": {
         "id", "source_name", "source_hash", "imported_at", "rows_read",
         "positions_created", "no_comment_count", "rejected_count",
@@ -83,6 +84,14 @@ class MetricSample:
 
 
 @dataclass(frozen=True)
+class ProjectionMetadata:
+    """Identity and analytical timezone of one published projection."""
+
+    revision: str
+    timezone: str
+
+
+@dataclass(frozen=True)
 class ProjectionData:
     """Parsed records and counters required to build a projection."""
 
@@ -94,6 +103,13 @@ class ProjectionData:
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
+CREATE TABLE projection_metadata (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  revision TEXT NOT NULL,
+  timezone TEXT NOT NULL
+);
+INSERT INTO projection_metadata (id, revision, timezone)
+VALUES (1, 'fixture', 'America/Bahia');
 CREATE TABLE imports (
   id INTEGER PRIMARY KEY,
   source_name TEXT NOT NULL,
@@ -216,26 +232,32 @@ def read_import_history(path: Path) -> list[ImportHistoryRow]:
         connection.close()
 
 
-def _configure_projection_connection(connection: sqlite3.Connection) -> None:
+def _configure_projection_connection(
+    connection: sqlite3.Connection, analysis_timezone: ZoneInfo
+) -> None:
     """Configure SQLite row access and deterministic timestamp functions."""
     connection.row_factory = sqlite3.Row
     connection.create_function(
         "utc_timestamp", 1, _utc_timestamp, deterministic=True
     )
     connection.create_function(
-        "bahia_date", 1, _bahia_date, deterministic=True
+        "analytical_date",
+        1,
+        lambda value: _analytical_date(value, analysis_timezone),
+        deterministic=True,
     )
 
 
-def _open_projection(path: Path) -> sqlite3.Connection:
+def _open_projection(path: Path, analysis_timezone: ZoneInfo) -> sqlite3.Connection:
     """Open a compatible projection in read-only mode or raise a stable error."""
     if not path.is_file():
         raise ProjectionUnavailableError("projeção SQLite indisponível")
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-        _configure_projection_connection(connection)
+        _configure_projection_connection(connection, analysis_timezone)
         _validate_projection(connection)
+        _validate_projection_timezone(connection, analysis_timezone)
         return connection
     except (OSError, sqlite3.Error, ValueError) as exc:
         if connection is not None:
@@ -266,6 +288,33 @@ def _validate_projection(connection: sqlite3.Connection) -> None:
             raise ValueError(
                 f"colunas ausentes em {table}: {sorted(missing_columns)}"
             )
+
+
+def _validate_projection_timezone(
+    connection: sqlite3.Connection, analysis_timezone: ZoneInfo
+) -> None:
+    """Reject a projection built under a different analytical timezone."""
+    row = connection.execute(
+        "SELECT revision, timezone FROM projection_metadata WHERE id = 1"
+    ).fetchone()
+    if row is None or not row[0] or row[1] != analysis_timezone.key:
+        raise ValueError("projeção incompatível com timezone configurada")
+
+
+def read_projection_metadata(
+    path: Path, analysis_timezone: ZoneInfo
+) -> ProjectionMetadata:
+    """Return metadata only after validating the configured analytical timezone."""
+    connection = _open_projection(path, analysis_timezone)
+    try:
+        row = connection.execute(
+            "SELECT revision, timezone FROM projection_metadata WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            raise ProjectionUnavailableError("projeção SQLite indisponível")
+        return ProjectionMetadata(str(row[0]), str(row[1]))
+    finally:
+        connection.close()
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 def _page_rows(
     connection: sqlite3.Connection,
@@ -300,12 +349,12 @@ def _utc_timestamp(value: object) -> str | None:
     return timestamp.astimezone(timezone.utc).isoformat()
 
 
-def _bahia_date(value: object) -> str | None:
-    """Return the calendar date of an aware timestamp in America/Bahia."""
+def _analytical_date(value: object, analysis_timezone: ZoneInfo) -> str | None:
+    """Return the local date of an aware timestamp in the configured timezone."""
     normalized = _utc_timestamp(value)
     if normalized is None:
         return None
-    return datetime.fromisoformat(normalized).astimezone(REPORT_TZ).date().isoformat()
+    return datetime.fromisoformat(normalized).astimezone(analysis_timezone).date().isoformat()
 
 
 def _normalize_timestamps(
@@ -326,6 +375,7 @@ def read_positions(
     offset: int,
     sort_by: str,
     sort_order: str,
+    analysis_timezone: ZoneInfo,
     filters: PositionFilters | None = None,
 ) -> tuple[list[ProjectionRow], int]:
     """Read a deterministic page of analytical positions from the projection."""
@@ -348,7 +398,7 @@ def read_positions(
         f"FROM positions {where_sql} "
         f"ORDER BY {column} {order}, position_id ASC LIMIT ? OFFSET ?"
     )
-    connection = _open_projection(path)
+    connection = _open_projection(path, analysis_timezone)
     try:
         rows, total = _page_rows(
             connection,
@@ -386,17 +436,17 @@ def _position_where(filters: PositionFilters) -> tuple[str, tuple[object, ...]]:
         parameters.append(1 if filters.association == "associated" else 0)
     analytical_timestamp = "CASE WHEN status = 'open' THEN entry_at ELSE exit_at END"
     if filters.date_from is not None:
-        clauses.append(f"bahia_date({analytical_timestamp}) >= ?")
+        clauses.append(f"analytical_date({analytical_timestamp}) >= ?")
         parameters.append(filters.date_from.isoformat())
     if filters.date_to is not None:
-        clauses.append(f"bahia_date({analytical_timestamp}) <= ?")
+        clauses.append(f"analytical_date({analytical_timestamp}) <= ?")
         parameters.append(filters.date_to.isoformat())
     return ("WHERE " + " AND ".join(clauses) if clauses else "", tuple(parameters))
 
 
-def read_filter_options(path: Path) -> dict[str, list[str]]:
+def read_filter_options(path: Path, analysis_timezone: ZoneInfo) -> dict[str, list[str]]:
     """Return observed strategy and symbol-family filter values."""
-    connection = _open_projection(path)
+    connection = _open_projection(path, analysis_timezone)
     try:
         try:
             strategies = [
@@ -442,12 +492,14 @@ def _transaction_id_key(value: object) -> tuple[int, int, str]:
         return (1, 0, identifier)
 
 
-def _opening_balances(rows: Iterable[sqlite3.Row]) -> dict[date, float | None]:
+def _opening_balances(
+    rows: Iterable[sqlite3.Row], analysis_timezone: ZoneInfo
+) -> dict[date, float | None]:
     """Reconstruct each adjusted opening balance from the global account ledger."""
     by_day: dict[date, list[tuple[datetime, tuple[int, int, str], sqlite3.Row]]] = {}
     for row in rows:
         timestamp = datetime.fromisoformat(_utc_timestamp(row["at"]) or "")
-        local_day = timestamp.astimezone(REPORT_TZ).date()
+        local_day = timestamp.astimezone(analysis_timezone).date()
         by_day.setdefault(local_day, []).append(
             (timestamp, _transaction_id_key(row["transaction_id"]), row)
         )
@@ -475,10 +527,12 @@ def _opening_balances(rows: Iterable[sqlite3.Row]) -> dict[date, float | None]:
 
 # Reading the related inputs in one connection preserves a consistent snapshot.
 # pylint: disable=too-many-locals
-def read_metric_sample(path: Path, filters: PositionFilters) -> MetricSample:
+def read_metric_sample(
+    path: Path, filters: PositionFilters, analysis_timezone: ZoneInfo
+) -> MetricSample:
     """Return filtered outcomes and global ledger inputs in one snapshot."""
     where_sql, parameters = _position_where(filters)
-    connection = _open_projection(path)
+    connection = _open_projection(path, analysis_timezone)
     try:
         try:
             # The SQL fragment contains only fixed predicates from _position_where;
@@ -495,13 +549,22 @@ def read_metric_sample(path: Path, filters: PositionFilters) -> MetricSample:
                 if row["status"] == "closed":
                     pnl = _finite_number(row["pnl"], "P&L")
                     pnl_values.append(pnl)
-                    closed_day = date.fromisoformat(_bahia_date(row["exit_at"]) or "")
+                    closed_day = date.fromisoformat(
+                        _analytical_date(row["exit_at"], analysis_timezone) or ""
+                    )
                     pnl_by_day.setdefault(closed_day, []).append(pnl)
                     closed_at = datetime.fromisoformat(_utc_timestamp(row["exit_at"]) or "")
                     pnl_by_instant.setdefault(closed_at, []).append(pnl)
-            excluded_open_positions = sum(row["status"] == "open" for row in rows)
+            open_where_sql, open_parameters = _position_where(
+                replace(filters, status="open")
+            )
+            excluded_open_positions = connection.execute(
+                "SELECT COUNT(*) FROM positions "
+                f"{open_where_sql}",  # nosec B608  # nosemgrep
+                open_parameters,
+            ).fetchone()[0]
             global_closed_days = [
-                date.fromisoformat(_bahia_date(row[0]) or "")
+                date.fromisoformat(_analytical_date(row[0], analysis_timezone) or "")
                 for row in connection.execute(
                     "SELECT exit_at FROM positions WHERE status = 'closed'"
                 )
@@ -515,7 +578,7 @@ def read_metric_sample(path: Path, filters: PositionFilters) -> MetricSample:
             }
             if not all(math.isfinite(value) for value in daily_pnl.values()):
                 raise ValueError("P&L diário não finito")
-            opening_balances = _opening_balances(transaction_rows)
+            opening_balances = _opening_balances(transaction_rows, analysis_timezone)
             closed_events = tuple(
                 (at, sum((Fraction(str(value)) for value in values), Fraction(0)))
                 for at, values in sorted(pnl_by_instant.items())
@@ -536,9 +599,9 @@ def read_metric_sample(path: Path, filters: PositionFilters) -> MetricSample:
 # pylint: enable=too-many-locals
 
 
-def read_strategy_keys(path: Path) -> list[ProjectionRow]:
+def read_strategy_keys(path: Path, analysis_timezone: ZoneInfo) -> list[ProjectionRow]:
     """Return the symbol-qualified strategy identities present in the projection."""
-    connection = _open_projection(path)
+    connection = _open_projection(path, analysis_timezone)
     try:
         try:
             rows = connection.execute(
@@ -555,9 +618,11 @@ def read_strategy_keys(path: Path) -> list[ProjectionRow]:
         connection.close()
 
 
-def read_position_orders(path: Path, position_id: str) -> list[ProjectionRow] | None:
+def read_position_orders(
+    path: Path, position_id: str, analysis_timezone: ZoneInfo
+) -> list[ProjectionRow] | None:
     """Read orders for a known report position identifier, if it exists."""
-    connection = _open_projection(path)
+    connection = _open_projection(path, analysis_timezone)
     try:
         try:
             exists = connection.execute(
@@ -582,7 +647,7 @@ def read_position_orders(path: Path, position_id: str) -> list[ProjectionRow] | 
 
 
 def read_imports(
-    path: Path, *, limit: int, offset: int
+    path: Path, *, limit: int, offset: int, analysis_timezone: ZoneInfo
 ) -> tuple[list[ProjectionRow], int]:
     """Read valid import history in reverse chronological order."""
     query = (
@@ -590,7 +655,7 @@ def read_imports(
         "no_comment_count, rejected_count FROM imports "
         "ORDER BY utc_timestamp(imported_at) DESC, id DESC LIMIT ? OFFSET ?"
     )
-    connection = _open_projection(path)
+    connection = _open_projection(path, analysis_timezone)
     try:
         rows, total = _page_rows(
             connection, query, "SELECT COUNT(*) FROM imports", limit, offset
@@ -675,11 +740,13 @@ def _transaction_values(
     )
 
 
+# pylint: disable=too-many-arguments,too-many-positional-arguments
 def build_projection(
     path: Path,
     source_name: str,
     source_hash: str,
     projection: ProjectionData,
+    analysis_timezone: ZoneInfo,
     prior_imports: Iterable[ImportHistoryRow] = (),
 ) -> None:
     """Build a complete SQLite projection atomically in the target file."""
@@ -687,6 +754,10 @@ def build_projection(
     connection = sqlite3.connect(path)
     try:
         connection.executescript(SCHEMA)
+        connection.execute(
+            "UPDATE projection_metadata SET revision = ?, timezone = ? WHERE id = 1",
+            (uuid.uuid4().hex, analysis_timezone.key),
+        )
         positions = list(projection.positions)
         orders = list(projection.orders)
         transactions = list(projection.transactions)
@@ -747,3 +818,4 @@ def build_projection(
         connection.commit()
     finally:
         connection.close()
+# pylint: enable=too-many-arguments,too-many-positional-arguments

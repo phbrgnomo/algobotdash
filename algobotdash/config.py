@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -33,6 +34,7 @@ class ImportConfig:
     """Validated configuration used by the import service."""
 
     source_path: Path
+    timezone: ZoneInfo
     symbol_prefixes: tuple[tuple[str, str], ...]
     strategy_groups: tuple[StrategyGroup, ...]
 
@@ -76,7 +78,19 @@ def load_config(path: str | Path) -> ImportConfig:
         source_path=_source_path(raw, config_path),
         symbol_prefixes=_symbol_prefixes(raw),
         strategy_groups=_strategy_groups(raw),
+        timezone=_timezone(raw),
     )
+
+
+def _timezone(raw: dict[Any, Any]) -> ZoneInfo:
+    """Read the required IANA timezone used by the complete analysis."""
+    value = raw.get("timezone")
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigurationError("timezone deve ser uma string IANA não vazia")
+    try:
+        return ZoneInfo(value.strip())
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ConfigurationError(f"timezone IANA inválido: {value!r}") from exc
 
 
 def _source_path(raw: dict[Any, Any], config_path: Path) -> Path:

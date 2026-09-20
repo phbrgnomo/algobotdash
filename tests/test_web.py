@@ -52,7 +52,7 @@ class WebTests(unittest.TestCase):
     def _write_config(self) -> None:
         """Write a valid configuration for the fixture source."""
         (self.config_dir / "config.yaml").write_text(
-            f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
+            f"timezone: America/Bahia\nsource:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
             encoding="utf-8",
         )
 
@@ -100,6 +100,8 @@ class WebTests(unittest.TestCase):
 
         self.assertIn('fetch("/api/status"', content)
         self.assertIn('fetch("/api/filter-options"', content)
+        self.assertIn("projection_revision", content)
+        self.assertIn("timeZone: analysisTimezone", content)
         self.assertIn("/api/positions?${query}", content)
         self.assertIn("/api/metrics?${query}", content)
         self.assertIn('id="filter-strategy"', content)
@@ -199,6 +201,7 @@ const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: 
   unavailable_reasons: {net_pnl: "realized_metrics_unavailable_for_open_status"}};
 const statusPayload = () => ({state, configuration: "valid", source: "available",
   projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
+  timezone: "America/Bahia", projection_revision: state === "ready" ? "revision" : null,
   last_import: state === "ready" ? {source_hash: "hash", imported_at: "2026-08-01T00:00:00Z"} : null});
 const context = {
   document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
@@ -231,6 +234,7 @@ const watchdog = setTimeout(() => {
   await flush(); await flush();
 
   if (elements["#risk-deepest"].textContent !== "-10,00") throw new Error("missing monetary depth");
+  if (elements["#risk-longest"].textContent !== "1 dia") throw new Error("singular duration mismatch");
   if (elements["#risk-percentage-deepest"].textContent !== "-125,00%") throw new Error("missing percentage depth");
   if (!elements["#risk-longest-detail"].textContent.includes("Em andamento")) throw new Error("missing open episode state");
 
@@ -391,6 +395,7 @@ const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: 
   unavailable_reasons: {net_pnl: "realized_metrics_unavailable_for_open_status"}};
 const payload = () => ({state, configuration: "valid", source: "available",
   projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
+  timezone: "America/Bahia", projection_revision: state === "ready" ? "revision" : null,
   last_import: state === "ready" ? {source_hash: "same-hash", imported_at: "2026-08-01T00:00:00+00:00"} : null});
 const context = {
   document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
@@ -501,9 +506,9 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   const olderStatus = context.loadStatus();
   const newerStatus = context.loadStatus();
   if (pendingStatuses.length !== 2) throw new Error(`expected 2 pending status requests, got ${pendingStatuses.length}`);
-  pendingStatuses[1]({ok: true, json: async () => ({state: "ready", configuration: "valid", source: "available", projection: "available", source_name: "Report.xlsx", last_import: {source_hash: "new-hash", imported_at: "2026-08-02T00:00:00+00:00"}})});
+  pendingStatuses[1]({ok: true, json: async () => ({state: "ready", configuration: "valid", source: "available", projection: "available", source_name: "Report.xlsx", timezone: "America/Bahia", projection_revision: "new-revision", last_import: {source_hash: "same-hash", imported_at: "2026-08-02T00:00:00+00:00"}})});
   await flush();
-  pendingStatuses[0]({ok: true, json: async () => ({state: "unavailable", configuration: "valid", source: "available", projection: "invalid", source_name: "Report.xlsx", last_import: null})});
+  pendingStatuses[0]({ok: true, json: async () => ({state: "unavailable", configuration: "valid", source: "available", projection: "invalid", source_name: "Report.xlsx", timezone: "America/Bahia", projection_revision: null, last_import: null})});
   await Promise.all([olderStatus, newerStatus]);
   if (elements["#service"].textContent !== "pronto") throw new Error("stale status overwrote current state");
   if (elements["#filter-strategy"].value !== "") throw new Error("removed strategy selection was preserved");
@@ -580,7 +585,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     sharpe_annualized: null, sortino_annualized: null,
     opening_balance_required_days: 2, opening_balance_covered_days: 1,
     opening_balance_missing_dates: ["2026-08-02"], opening_balance_non_positive_dates: [],
-    unavailable_reasons: {sharpe_daily: "invalid_opening_balance_coverage",
+    unavailable_reasons: {}, temporal_unavailable_reasons: {sharpe_daily: "invalid_opening_balance_coverage",
       sortino_daily: "invalid_opening_balance_coverage",
       sharpe_annualized: "invalid_opening_balance_coverage",
       sortino_annualized: "invalid_opening_balance_coverage"}});
