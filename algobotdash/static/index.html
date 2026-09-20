@@ -13,6 +13,7 @@
       dt, small { color: #9eabb4; } dd { margin: 0; overflow-wrap: anywhere; }
       .ok { color: #59d69b; } .warn { color: #f5c15d; } .error { color: #ff7b86; }
       #error, #filter-state, #table-state, #metrics-state { margin-top: 16px; color: #ffb4ba; }
+      #refresh-state { margin: 10px 0 0; }
       .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
       .controls, .filters, .pagination { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
       .filters { border: 0; border-top: 1px solid #34414a; margin-top: 16px; padding: 16px 0 0; }
@@ -49,6 +50,10 @@
         </dl>
         <p id="error" hidden></p>
         <small id="updated-at">Ainda não atualizado.</small>
+        <div class="controls">
+          <button id="refresh-button" type="button">Atualizar dados</button>
+          <span id="refresh-state" aria-live="polite">Nenhuma atualização solicitada.</span>
+        </div>
       </section>
 
       <section aria-labelledby="positions-title">
@@ -167,6 +172,7 @@
       let metricRequestGeneration = 0;
       let statusRequestGeneration = 0;
       let filterRequestGeneration = 0;
+      let refreshPollTimer = null;
 
       function label(value) {
         return {valid: "válida", invalid: "inválida", available: "disponível",
@@ -361,6 +367,58 @@
         document.querySelector("#source-hash").textContent = data.last_import?.source_hash || "—";
         document.querySelector("#last-imported-at").textContent = formatDate(data.last_import?.imported_at);
         document.querySelector("#updated-at").textContent = `Atualizado em ${formatDate(new Date().toISOString())}`;
+        renderRefresh(data.refresh_operation);
+      }
+
+      function renderRefresh(operation) {
+        const button = document.querySelector("#refresh-button");
+        const state = document.querySelector("#refresh-state");
+        const active = operation && ["queued", "running"].includes(operation.state);
+        button.disabled = Boolean(active);
+        if (!operation) {
+          state.textContent = "Nenhuma atualização solicitada.";
+        } else if (operation.state === "completed") {
+          state.textContent = `Atualização concluída em ${formatDate(operation.finished_at)}.`;
+        } else if (operation.state === "error") {
+          state.textContent = `Erro na atualização: ${operation.error?.message || "falha desconhecida"}`;
+        } else {
+          const stages = {queued: "aguardando", validating_configuration: "validando configuração",
+            copying_source: "copiando fonte", reading_source: "lendo fonte",
+            building_projection: "construindo projeção", publishing: "publicando projeção"};
+          const started = operation.started_at || operation.created_at;
+          const elapsed = Math.max(0, Math.floor((Date.now() - Date.parse(started)) / 1000));
+          state.textContent = `Atualização em andamento: ${stages[operation.stage] || operation.stage} (${elapsed}s).`;
+        }
+        if (refreshPollTimer !== null && typeof clearTimeout === "function") {
+          clearTimeout(refreshPollTimer);
+          refreshPollTimer = null;
+        }
+        if (active && typeof setTimeout === "function") {
+          refreshPollTimer = setTimeout(loadStatus, 1000);
+        }
+      }
+
+      async function startRefresh() {
+        const button = document.querySelector("#refresh-button");
+        button.disabled = true;
+        setNotice("#error", "", false);
+        try {
+          const response = await fetch("/api/refresh", {
+            method: "POST", headers: {"X-Algobotdash-Request": "refresh"},
+          });
+          const data = await response.json();
+          if (response.status === 409) {
+            document.querySelector("#refresh-state").textContent = "Já existe uma atualização em andamento.";
+            await loadStatus();
+            return;
+          }
+          if (!response.ok) throw new Error(data.detail?.code || `HTTP ${response.status}`);
+          renderRefresh(data);
+          await loadStatus();
+        } catch (error) {
+          button.disabled = false;
+          setNotice("#error", `Atenção: não foi possível iniciar a atualização (${error.message}).`, true);
+        }
       }
 
       function renderPositions(data) {
@@ -629,6 +687,7 @@
       document.querySelector("#next-page").addEventListener("click", () => {
         page.offset += page.limit; loadPositions();
       });
+      document.querySelector("#refresh-button").addEventListener("click", startRefresh);
       loadStatus();
       setInterval(loadStatus, 5000);
     </script>
