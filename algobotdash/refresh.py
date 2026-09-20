@@ -154,19 +154,26 @@ class RefreshOperationStore:
         stage: str = "completed",
     ) -> None:
         """Finish an attempt successfully."""
-        assignments = (
-            "state = 'completed', stage = ?, finished_at = ?, "
-            "error_code = NULL, error_message = NULL"
-        )
-        parameters: tuple[object, ...] = (stage, _now())
-        if summary is not None:
-            assignments += ", summary_json = ?"
-            parameters += (json.dumps(summary, ensure_ascii=False),)
         with self._connect() as connection:
-            connection.execute(
-                f"UPDATE refresh_operations SET {assignments} WHERE operation_id = ?",
-                (*parameters, operation_id),
-            )
+            if summary is None:
+                connection.execute(
+                    "UPDATE refresh_operations SET state = 'completed', stage = ?, "
+                    "finished_at = ?, error_code = NULL, error_message = NULL "
+                    "WHERE operation_id = ?",
+                    (stage, _now(), operation_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE refresh_operations SET state = 'completed', stage = ?, "
+                    "finished_at = ?, error_code = NULL, error_message = NULL, "
+                    "summary_json = ? WHERE operation_id = ?",
+                    (
+                        stage,
+                        _now(),
+                        json.dumps(summary, ensure_ascii=False),
+                        operation_id,
+                    ),
+                )
 
     def fail(self, operation_id: str, code: str, message: str) -> None:
         """Finish an attempt with a controlled public error."""
@@ -197,18 +204,12 @@ class RefreshOperationStore:
 
     def has_unresolved(self, live_operation_ids: set[str]) -> bool:
         """Return whether a non-live queued or running attempt needs recovery."""
-        query = (
-            "SELECT 1 FROM refresh_operations "
-            "WHERE state IN ('queued', 'running') "
-        )
-        parameters: tuple[object, ...] = ()
-        if live_operation_ids:
-            placeholders = ", ".join("?" for _ in live_operation_ids)
-            query += f"AND operation_id NOT IN ({placeholders}) "
-            parameters = tuple(live_operation_ids)
         with self._connect() as connection:
-            row = connection.execute(f"{query}LIMIT 1", parameters).fetchone()
-        return row is not None
+            rows = connection.execute(
+                "SELECT operation_id FROM refresh_operations "
+                "WHERE state IN ('queued', 'running')"
+            ).fetchall()
+        return any(str(row["operation_id"]) not in live_operation_ids for row in rows)
 
     def reconcile_interrupted(
         self, database: str | Path, live_operation_ids: set[str]

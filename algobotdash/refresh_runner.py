@@ -12,6 +12,7 @@ from .config import ConfigurationError, load_config
 from .refresh import (
     DatabaseRefreshLock,
     RefreshInProgressError,
+    RefreshLockUnavailableError,
     RefreshOperation,
     RefreshOperationStore,
 )
@@ -83,7 +84,7 @@ class RefreshRunner:
         lock = DatabaseRefreshLock(self.database_path)
         try:
             lock.acquire()
-        except RefreshInProgressError:
+        except (RefreshInProgressError, RefreshLockUnavailableError):
             return
         try:
             self.store.reconcile_interrupted(self.database_path, _live_snapshot())

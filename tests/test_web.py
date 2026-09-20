@@ -71,7 +71,10 @@ class WebTests(unittest.TestCase):  # pylint: disable=too-many-public-methods
         """Issue one request through the public ASGI interface."""
         request_headers = headers
         if request_headers is None and method == "POST" and path == "/api/refresh":
-            request_headers = {"X-Algobotdash-Request": "refresh"}
+            request_headers = {
+                "X-Algobotdash-Request": "refresh",
+                "Origin": "http://localhost",
+            }
 
         async def request() -> httpx.Response:
             transport = httpx.ASGITransport(app=app)
@@ -858,7 +861,11 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
         with self._paths(), patch(
             "algobotdash.web.RefreshRunner.start", return_value=operation
         ):
-            no_origin = self._request("POST", "/api/refresh")
+            no_origin = self._request(
+                "POST",
+                "/api/refresh",
+                headers={"X-Algobotdash-Request": "refresh"},
+            )
             localhost = self._request(
                 "POST",
                 "/api/refresh",
@@ -925,7 +932,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
                 ipv4.status_code,
                 ipv6.status_code,
             ),
-            (202, 202, 202, 202, 202),
+            (403, 202, 202, 202, 202),
         )
         self.assertEqual(
             (
@@ -942,12 +949,24 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
     def test_refresh_api_reports_unavailable_platform_lock(self) -> None:
         """A runtime without fcntl keeps reads available and rejects refresh clearly."""
+        store = RefreshOperationStore.for_database(
+            self.data_dir / "algobotdash.sqlite"
+        )
+        operation = store.create("pending-revision")
         with self._paths(), patch("algobotdash.refresh._fcntl", None):
             status = self._request("GET", "/api/status")
+            persisted = self._request(
+                "GET", f"/api/refresh/{operation.operation_id}"
+            )
             refresh = self._request("POST", "/api/refresh")
 
         self.assertEqual(status.status_code, 200)
-        self.assertIsNone(status.json()["refresh_operation"])
+        self.assertEqual(
+            status.json()["refresh_operation"]["operation_id"],
+            operation.operation_id,
+        )
+        self.assertEqual(persisted.status_code, 200)
+        self.assertEqual(persisted.json()["state"], "queued")
         self.assertEqual(refresh.status_code, 503)
         self.assertEqual(
             refresh.json()["detail"]["code"], "refresh_state_unavailable"

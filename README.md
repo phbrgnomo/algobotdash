@@ -176,7 +176,8 @@ fica em `data/algobotdash.sqlite.operations.sqlite`; o arquivo
 `data/algobotdash.sqlite.refresh.lock` impede concorrência entre o backend e a CLI.
 `POST /api/refresh` retorna HTTP 202 e um identificador consultável em
 `GET /api/refresh/{operation_id}`. O POST exige o cabeçalho
-`X-Algobotdash-Request: refresh`; uma tentativa simultânea retorna HTTP 409.
+`X-Algobotdash-Request: refresh` e um `Origin` explícito de `localhost`,
+`127.0.0.1` ou `::1`; uma tentativa simultânea retorna HTTP 409.
 
 ## Fluxo de atualização
 

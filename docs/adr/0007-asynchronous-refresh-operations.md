@@ -31,6 +31,11 @@ em `/api/status`; qualquer tentativa persistida pode ser consultada pelo identif
 Falhas mantêm a projeção anterior, mas não mudam as regras existentes: YAML inválido ou
 fuso incompatível continuam bloqueando consultas analíticas.
 
+O endpoint mutável aceita somente requisições marcadas com origem explícita de loopback.
+Leituras do estado persistido continuam disponíveis quando o runtime não oferece `fcntl`;
+nesse caso, novas atualizações permanecem indisponíveis porque não podem garantir exclusão
+entre processos.
+
 ## Consequências
 
 - Fechar ou recarregar o navegador não cancela a atualização.

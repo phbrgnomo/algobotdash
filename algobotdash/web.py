@@ -53,9 +53,9 @@ def _error_message(exc: Exception) -> str:
 
 
 def _allowed_refresh_origin(origin: str | None) -> bool:
-    """Accept absent origins for API clients or exact local HTTP origins."""
+    """Accept only explicit, exact local HTTP origins."""
     if origin is None:
-        return True
+        return False
     try:
         parsed = urlsplit(origin)
         _ = parsed.port
