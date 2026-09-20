@@ -195,6 +195,21 @@ class RefreshOperationStore:
             ).fetchone()
         return self._operation(row) if row is not None else None
 
+    def has_unresolved(self, live_operation_ids: set[str]) -> bool:
+        """Return whether a non-live queued or running attempt needs recovery."""
+        query = (
+            "SELECT 1 FROM refresh_operations "
+            "WHERE state IN ('queued', 'running') "
+        )
+        parameters: tuple[object, ...] = ()
+        if live_operation_ids:
+            placeholders = ", ".join("?" for _ in live_operation_ids)
+            query += f"AND operation_id NOT IN ({placeholders}) "
+            parameters = tuple(live_operation_ids)
+        with self._connect() as connection:
+            row = connection.execute(f"{query}LIMIT 1", parameters).fetchone()
+        return row is not None
+
     def reconcile_interrupted(
         self, database: str | Path, live_operation_ids: set[str]
     ) -> None:

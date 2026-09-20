@@ -78,6 +78,8 @@ class RefreshRunner:
 
     def _reconcile_if_idle(self) -> None:
         """Recover stale operations only when no importer owns the projection."""
+        if not self.store.has_unresolved(_live_snapshot()):
+            return
         lock = DatabaseRefreshLock(self.database_path)
         try:
             lock.acquire()

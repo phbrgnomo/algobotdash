@@ -146,6 +146,64 @@ class RefreshOperationTests(unittest.TestCase):
         self.assertEqual(restored.state, "error")
         self.assertEqual(restored.error_code, "operation_interrupted")
 
+    def test_runner_construction_does_not_lock_without_stale_operations(self) -> None:
+        """Routine polling cannot briefly block admission for an idle projection."""
+        config_path = self.workspace / "config.yaml"
+
+        with patch.object(
+            DatabaseRefreshLock,
+            "acquire",
+            autospec=True,
+            side_effect=AssertionError("idle reconciliation acquired admission lock"),
+        ) as acquire:
+            runner = RefreshRunner(config_path, self.database)
+
+        acquire.assert_not_called()
+        self.assertIsNone(runner.latest())
+
+    def test_live_operation_does_not_trigger_constructor_reconciliation(self) -> None:
+        """Polling ignores an operation that belongs to this process's worker."""
+        source = self.workspace / "ReportHistory.xlsx"
+        workbook(source)
+        config_path = self._write_config(source)
+        runner = RefreshRunner(config_path, self.database)
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+
+        def blocked_refresh(
+            _service: ImportService,
+            database_path: str | Path,
+            **_kwargs: object,
+        ) -> ImportSummary:
+            worker_started.set()
+            if not release_worker.wait(timeout=5):
+                raise TimeoutError("worker was not released")
+            return ImportSummary("hash", 1, 1, 0, 0, Path(database_path))
+
+        with patch.object(
+            ImportService,
+            "refresh_with_lock",
+            autospec=True,
+            side_effect=blocked_refresh,
+        ):
+            operation = runner.start()
+            self.assertTrue(worker_started.wait(timeout=5))
+            with patch.object(
+                DatabaseRefreshLock,
+                "acquire",
+                autospec=True,
+                side_effect=AssertionError("live operation triggered reconciliation"),
+            ) as acquire:
+                polled = RefreshRunner(config_path, self.database).get(
+                    operation.operation_id
+                )
+            acquire.assert_not_called()
+            release_worker.set()
+            completed = self._wait_for_operation(runner.store, operation.operation_id)
+
+        self.assertIsNotNone(polled)
+        self.assertEqual(completed.state, "completed")
+
     def test_reconciliation_handles_sqlite_uri_characters_in_database_name(self) -> None:
         """Read-only recovery opens the exact projection path after URI quoting."""
         database = self.workspace / "projection?#%.sqlite"
