@@ -16,40 +16,33 @@ from tests.fixture_helpers import workbook
 class EnvironmentTests(unittest.TestCase):
     """Verify deterministic and safe .env loading semantics."""
 
-    def test_loads_values_without_overriding_process_environment(self) -> None:
-        """Explicit process values must take precedence over the local file."""
+    def _load_with_process_config(self, contents: str) -> dict[str, str]:
+        """Load one fixture while preserving the explicit process config path."""
         with tempfile.TemporaryDirectory(prefix="algobotdash-env-tests-") as raw_dir:
             path = Path(raw_dir) / ".env"
-            _ = path.write_text(
-                "\n".join(
-                    [
-                        "# local configuration",
-                        "ALGOBOTDASH_CONFIG=file-config.yaml",
-                        "export ALGOBOTDASH_DATABASE='data/local.sqlite'",
-                        'QUOTED_VALUE="value with spaces"',
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            _ = path.write_text(contents, encoding="utf-8")
             environment = {"ALGOBOTDASH_CONFIG": "process-config.yaml"}
 
             loaded = load_environment(path, environ=environment)
 
         self.assertEqual(loaded, path)
         self.assertEqual(environment["ALGOBOTDASH_CONFIG"], "process-config.yaml")
+        return environment
+
+    def test_loads_values_without_overriding_process_environment(self) -> None:
+        """Explicit process values must take precedence over the local file."""
+        environment = self._load_with_process_config(
+            "# local configuration\n"
+            "ALGOBOTDASH_CONFIG=file-config.yaml\n"
+            "export ALGOBOTDASH_DATABASE='data/local.sqlite'\n"
+            'QUOTED_VALUE="value with spaces"'
+        )
         self.assertEqual(environment["ALGOBOTDASH_DATABASE"], "data/local.sqlite")
         self.assertEqual(environment["QUOTED_VALUE"], "value with spaces")
 
     def test_existing_process_value_skips_invalid_file_value(self) -> None:
         """A process value takes precedence without parsing its file fallback."""
-        with tempfile.TemporaryDirectory(prefix="algobotdash-env-tests-") as raw_dir:
-            path = Path(raw_dir) / ".env"
-            _ = path.write_text('ALGOBOTDASH_CONFIG="unterminated\n', encoding="utf-8")
-            environment = {"ALGOBOTDASH_CONFIG": "process-config.yaml"}
-
-            loaded = load_environment(path, environ=environment)
-
-        self.assertEqual(loaded, path)
+        environment = self._load_with_process_config('ALGOBOTDASH_CONFIG="unterminated\n')
         self.assertEqual(environment["ALGOBOTDASH_CONFIG"], "process-config.yaml")
 
     def test_missing_file_is_optional(self) -> None:
@@ -88,7 +81,9 @@ class EnvironmentTests(unittest.TestCase):
             database = directory / "algobotdash.sqlite"
             environment_path = directory / ".env"
             workbook(source)
-            _ = config.write_text(f"source:\n  path: {source}\n", encoding="utf-8")
+            _ = config.write_text(
+                f"timezone: America/Bahia\nsource:\n  path: {source}\n", encoding="utf-8"
+            )
             _ = environment_path.write_text(
                 f"ALGOBOTDASH_CONFIG={config}\nALGOBOTDASH_DATABASE={database}\n",
                 encoding="utf-8",

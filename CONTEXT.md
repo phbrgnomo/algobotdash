@@ -37,8 +37,8 @@ Resultado consolidado pela soma do P&L das execuções associadas ao ciclo, cons
 _Avoid_: lucro copiado sem reconciliação da posição
 
 **Histórico de importações**:
-Registro permanente das atualizações válidas, incluindo a identificação da fonte, seu hash, horário e indicadores de qualidade.
-_Avoid_: parte descartável da projeção
+Registro das atualizações válidas, incluindo a identificação da fonte, seu hash, horário e indicadores de qualidade. Persiste entre refreshes compatíveis; durante o pré-MVP pode ser reiniciado quando uma alteração estrutural exigir a reconstrução integral da projeção.
+_Avoid_: dado externo à projeção, histórico imutável durante o pré-MVP
 
 **Confiança do vínculo**:
 Grau de evidência de que uma ordem ou execução pertence a um ciclo, determinado por sinais concordantes do relatório; vínculos ambíguos permanecem não associados.
@@ -62,9 +62,21 @@ _Avoid_: agrupar somente por comentário, misturar a mesma regra entre famílias
 Conferência entre o P&L consolidado das posições e a soma das transações do relatório, sem usar essa conferência para inventar vínculos por estratégia.
 _Avoid_: atribuição de saída por igualdade de P&L
 
+**Ajuste de saldo**:
+Lançamento contábil diário que altera o saldo disponível, mas não representa resultado operacional nem compõe o P&L de uma estratégia.
+_Avoid_: operação, ganho ou perda da estratégia
+
+**Saldo de abertura ajustado**:
+Capital contábil disponível no início operacional do dia, após o ajuste de saldo de abertura e antes dos resultados operacionais daquele dia. É a referência de capital para métricas temporais.
+_Avoid_: capital informado manualmente, saldo após incorporar operações do dia
+
 **Posição analítica**:
-Unidade de análise do MVP, identificada pelo registro de posição; é classificada pela ordem correspondente quando `position_id` e `symbol_raw` coincidem e a ordem possui uma estratégia. Ciclos de piramidação não são inferidos nesta versão.
+Unidade de análise do MVP, identificada pelo registro de posição; recebe a classificação da ordem correspondente quando `position_id` e `symbol_raw` coincidem, mesmo que essa ordem não possua estratégia. Ciclos de piramidação não são inferidos nesta versão.
 _Avoid_: ciclo implícito, agrupamento por proximidade
+
+**Associação de posição**:
+Vínculo comprovado quando `position_id` e `symbol_raw` coincidem com o ticket e o símbolo bruto de uma ordem. A associação pode existir sem estratégia classificada; `strategy` nula não significa, sozinha, posição não associada.
+_Avoid_: inferir associação pela presença ou ausência de estratégia
 
 **Ordem**:
 Registro individual de intenção/estado do relatório, preservado como detalhe de rastreabilidade da posição quando houver vínculo explícito.
@@ -79,7 +91,7 @@ Agrupamento definido no arquivo YAML de configuração para comentários que rep
 _Avoid_: perna de estratégia
 
 **Configuração de agrupamento**:
-Arquivo YAML local que define como comentários e símbolos são normalizados. É a fonte canônica dessa regra no MVP.
+Arquivo YAML local que define como comentários e símbolos são normalizados, além do fuso analítico. É a fonte canônica dessas regras no MVP.
 _Avoid_: configuração editada pelo dashboard
 
 **Símbolo normalizado**:
@@ -98,6 +110,18 @@ _Avoid_: sincronização silenciosa
 Resultado calculado sobre as posições analíticas normalizadas e recalculado conforme o filtro solicitado.
 _Avoid_: valor pré-calculado permanente
 
+**Métricas gerais**:
+Resultados calculados sobre todas as posições analíticas realizadas que atendem aos filtros, inclusive posições sem estratégia comprovada. Métricas por estratégia consideram somente posições com identidade analítica de estratégia.
+_Avoid_: excluir resultado não classificado do total, atribuir estratégia sem vínculo comprovado
+
+**Data analítica**:
+Data civil no fuso analítico configurado: saída de uma posição realizada e entrada de uma posição aberta; é a referência usada pelo filtro de período.
+_Avoid_: misturar data de entrada e data de saída sem declarar a convenção
+
+**Fuso analítico**:
+Identificador IANA obrigatório no YAML que interpreta timestamps sem offset e define filtros, saldos de abertura, séries temporais, drawdowns e datas exibidas. Uma projeção construída sob outro fuso é indisponível até reconstrução.
+_Avoid_: usar o fuso do navegador, assumir um fallback implícito ou reutilizar uma projeção com fuso incompatível
+
 **Posição aberta**:
 Posição que possui entrada sem saída correspondente no relatório; permanece rastreável, mas não entra nas métricas realizadas além do P&L explicitamente informado pela fonte.
 _Avoid_: trade perdido
@@ -106,9 +130,13 @@ _Avoid_: trade perdido
 Registro preservado em um agregado separado para rastreabilidade, mas excluído das métricas por estratégia.
 _Avoid_: sem estratégia
 
-**Métrica por trade**:
+**Métrica por posição**:
 Métrica calculada tratando cada posição realizada como uma observação, sem anualização implícita.
-_Avoid_: métrica diária
+_Avoid_: métrica por trade, métrica diária
+
+**Expectância**:
+Valor esperado por posição realizada, calculado como a média aritmética de seu P&L líquido.
+_Avoid_: expectativa, potencial de lucro
 
 **Importação**:
 Execução identificada por hash da fonte, horário, contagens de linhas, posições, registros sem comentário e rejeições.

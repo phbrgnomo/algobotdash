@@ -8,19 +8,26 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import httpx
-
 from openpyxl import Workbook
-
+from starlette.types import ASGIApp
 
 _POSITION_INSERT = (
     "INSERT INTO positions("
     "position_id, strategy, symbol_family, symbol_raw, direction, entry_at, exit_at, "
     "status, volume_requested, volume_executed, entry_price, exit_price, commission, "
-    "swap, pnl, import_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "swap, pnl, is_associated, import_id) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+_TRANSACTION_INSERT = (
+    "INSERT INTO transactions("
+    "transaction_id, order_id, position_id, strategy, at, symbol_raw, direction, "
+    "volume, price, commission, tax, swap, pnl, balance, comment, import_id) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 
-def get_asgi(app: object, path: str) -> httpx.Response:
+def get_asgi(app: ASGIApp, path: str) -> httpx.Response:
     """Request one path from an ASGI app without opening a network port."""
     async def request() -> httpx.Response:
         transport = httpx.ASGITransport(app=app)
@@ -37,6 +44,13 @@ def insert_positions(
 ) -> None:
     """Insert analytical-position fixture rows using the canonical column order."""
     connection.executemany(_POSITION_INSERT, rows)
+
+
+def insert_transactions(
+    connection: sqlite3.Connection, rows: Iterable[tuple[object, ...]]
+) -> None:
+    """Insert account-ledger fixtures independently of the production writer."""
+    connection.executemany(_TRANSACTION_INSERT, rows)
 
 
 def workbook(

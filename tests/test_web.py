@@ -52,7 +52,7 @@ class WebTests(unittest.TestCase):
     def _write_config(self) -> None:
         """Write a valid configuration for the fixture source."""
         (self.config_dir / "config.yaml").write_text(
-            f"source:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
+            f"timezone: America/Bahia\nsource:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
             encoding="utf-8",
         )
 
@@ -60,6 +60,27 @@ class WebTests(unittest.TestCase):
         """Read health state using the isolated test paths."""
         with self._paths():
             return health()
+
+    def _health_payload_with(self, **expected: str) -> dict[str, Any]:
+        """Read health state and check the named fields shared by a fixture."""
+        payload = self._health_payload()
+        self.assertEqual({field: payload[field] for field in expected}, expected)
+        return payload
+
+    def _open_valid_projection(self) -> sqlite3.Connection:
+        """Create a current-schema projection after preparing valid configuration."""
+        self._write_config()
+        connection = sqlite3.connect(self.data_dir / "algobotdash.sqlite")
+        connection.executescript(SCHEMA)
+        return connection
+
+    def _commit_projection_and_read_health(
+        self, connection: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        """Publish a fixture projection before reading its public health state."""
+        connection.commit()
+        connection.close()
+        return self._health_payload()
 
     def test_dashboard_serves_own_static_page(self) -> None:
         """Dashboard should serve its own static HTML page."""
@@ -78,15 +99,243 @@ class WebTests(unittest.TestCase):
         content = Path(page).read_text(encoding="utf-8")
 
         self.assertIn('fetch("/api/status"', content)
+        self.assertIn('fetch("/api/filter-options"', content)
+        self.assertIn("projection_revision", content)
+        self.assertIn("timeZone: analysisTimezone", content)
         self.assertIn("/api/positions?${query}", content)
+        self.assertIn("/api/metrics?${query}", content)
+        self.assertIn('id="filter-strategy"', content)
+        self.assertIn('id="filter-symbol-family"', content)
+        self.assertIn('id="filter-direction"', content)
+        self.assertIn('id="filter-status"', content)
+        self.assertIn('id="filter-association"', content)
+        self.assertIn('id="date-from"', content)
+        self.assertIn('id="date-to"', content)
         self.assertIn('id="positions-body"', content)
         self.assertIn('id="previous-page"', content)
         self.assertIn('id="next-page"', content)
+        self.assertIn('<fieldset class="filters">', content)
+        self.assertIn('<legend>Filtros das posições</legend>', content)
+        self.assertIn('id="filter-state" aria-live="polite"', content)
+        self.assertIn('id="table-state" role="alert"', content)
+        self.assertIn('id="metrics-state" aria-live="polite"', content)
+        self.assertIn('id="metric-sample-size"', content)
+        self.assertIn('id="metric-winning-trades"', content)
+        self.assertIn('id="metric-losing-trades"', content)
+        self.assertIn('id="metric-net-pnl"', content)
+        self.assertIn('id="metric-sortino-per-position"', content)
+        self.assertIn('id="daily-metrics-title"', content)
+        self.assertIn('id="metric-sharpe-daily"', content)
+        self.assertIn('id="metric-sortino-daily"', content)
+        self.assertIn('id="annualized-metrics-title"', content)
+        self.assertIn('id="metric-sharpe-annualized"', content)
+        self.assertIn('id="metric-sortino-annualized"', content)
+        self.assertIn('id="temporal-metrics-summary"', content)
         self.assertIn("Projeção indisponível.", content)
 
     @unittest.skipUnless(NODE_EXECUTABLE, "requires Node.js for JavaScript execution")
-    def test_dashboard_recovers_positions_when_projection_returns_with_same_hash(self) -> None:
-        """Reload positions after unavailable state even when source hash is unchanged."""
+    def test_dashboard_invalidates_pending_queries_and_validates_filters(self) -> None:
+        """Terminal status and invalid filters must not leak stale dashboard state."""
+        runner = r"""
+const fs = require("fs");
+const vm = require("vm");
+const html = fs.readFileSync(process.env.DASHBOARD_PATH, "utf8");
+const source = html.match(/<script>([\s\S]*)<\/script>/)[1];
+class Element {
+  constructor() { this.value = ""; this.listeners = {}; this.children = []; }
+  replaceChildren(...children) { this.children = children; }
+  append(child) { this.children.push(child); }
+  addEventListener(name, handler) { this.listeners[name] = handler; }
+}
+const ids = ["service", "configuration", "source", "projection", "source-name",
+  "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
+  "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
+  "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
+  "filter-association", "date-from", "date-to", "metrics-summary", "temporal-metrics-summary", "metrics-state",
+  "metric-sample-size", "metric-winning-trades", "metric-losing-trades",
+  "metric-net-pnl", "metric-gross-profit", "metric-gross-loss", "metric-win-rate",
+  "metric-profit-factor", "metric-payoff", "metric-expectancy",
+  "metric-sharpe-per-position", "metric-sortino-per-position", "metric-sharpe-daily",
+  "metric-sortino-daily", "metric-sharpe-annualized", "metric-sortino-annualized",
+  "reason-sharpe-daily", "reason-sortino-daily", "reason-sharpe-annualized",
+  "reason-sortino-annualized", "risk-deepest", "risk-longest", "risk-deepest-detail", "risk-longest-detail",
+  "risk-percentage-deepest", "risk-percentage-longest", "risk-percentage-deepest-detail", "risk-percentage-longest-detail"];
+const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
+elements["#sort-by"].value = "closed_at";
+elements["#sort-order"].value = "desc";
+elements["#filter-status"].value = "closed";
+elements["#filter-association"].value = "all";
+let interval;
+let state = "ready";
+let positionFetches = 0;
+let positionMode = "normal";
+let metricMode = "normal";
+let filterMode = "normal";
+const pendingPositions = [];
+const pendingMetrics = [];
+const pendingFilters = [];
+const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
+  percentage_drawdown: {state: "available", deepest_episode: {depth: -1.25,
+    peak_at: "2026-08-01T03:00:00Z", valley_at: "2026-08-02T12:00:00Z",
+    recovery_at: null, duration_days: 1}, longest_episode: {depth: -1.25,
+    peak_at: "2026-08-01T03:00:00Z", valley_at: "2026-08-02T12:00:00Z",
+    recovery_at: null, duration_days: 1}},
+  monetary_drawdown: {state: "available", deepest_episode: {depth: -10,
+    peak_at: "2026-08-01T03:00:00Z", valley_at: "2026-08-02T12:00:00Z",
+    recovery_at: null, duration_days: 1}, longest_episode: {depth: -10,
+    peak_at: "2026-08-01T03:00:00Z", valley_at: "2026-08-02T12:00:00Z",
+    recovery_at: null, duration_days: 1}},
+  gross_profit: 20, gross_loss: -10, winning_trades: 1, losing_trades: 1,
+  win_rate: 0.5, profit_factor: 2, payoff: 2,
+  expectancy: 5, sharpe_per_position: 0.5, sortino_per_position: 0.5,
+  effective_date_from: "2026-08-01", effective_date_to: "2026-08-02",
+  daily_observation_days: 2, opening_balance_required_days: 2,
+  opening_balance_covered_days: 2, opening_balance_missing_dates: [],
+  opening_balance_non_positive_dates: [], sharpe_daily: 0.4, sortino_daily: 0.3,
+  sharpe_annualized: null, sortino_annualized: null,
+  unavailable_reasons: {}};
+const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: null,
+  gross_profit: null, gross_loss: null, winning_trades: null, losing_trades: null,
+  win_rate: null, profit_factor: null, payoff: null,
+  expectancy: null, sharpe_per_position: null, sortino_per_position: null,
+  unavailable_reasons: {net_pnl: "realized_metrics_unavailable_for_open_status"}};
+const statusPayload = () => ({state, configuration: "valid", source: "available",
+  projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
+  timezone: "America/Bahia", projection_revision: state === "ready" ? "revision" : null,
+  last_import: state === "ready" ? {source_hash: "hash", imported_at: "2026-08-01T00:00:00Z"} : null});
+const context = {
+  document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
+  fetch: async (url) => {
+    if (url === "/api/status") return {ok: true, status: 200, json: async () => statusPayload()};
+    if (url === "/api/filter-options") {
+      if (filterMode === "pending") return new Promise((resolve) => pendingFilters.push(resolve));
+      return {ok: true, status: 200, json: async () => ({strategies: ["Turtle"], symbol_families: ["WIN"]})};
+    }
+    if (url.startsWith("/api/metrics?")) {
+      if (metricMode === "pending") return new Promise((resolve) => pendingMetrics.push(resolve));
+      return {ok: true, status: 200, json: async () => metricPayload};
+    }
+    positionFetches += 1;
+    if (positionMode === "pending") return new Promise((resolve) => pendingPositions.push(resolve));
+    if (positionMode === "validation") return {ok: false, status: 422,
+      json: async () => ({detail: {code: "contradictory_filters"}})};
+    return {ok: true, status: 200, json: async () => ({items: [], total: 0})};
+  },
+  setInterval: (callback) => { interval = callback; return 1; },
+  URLSearchParams, Intl, Date, console,
+};
+vm.runInNewContext(source + "\nglobalThis.loadPositions = loadPositions; globalThis.loadMetrics = loadMetrics; globalThis.loadFilterOptions = loadFilterOptions;", context);
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+const watchdog = setTimeout(() => {
+  console.error("dashboard regression test did not complete");
+  process.exitCode = 1;
+}, 2000);
+(async () => {
+  await flush(); await flush();
+
+  if (elements["#risk-deepest"].textContent !== "-10,00") throw new Error("missing monetary depth");
+  if (elements["#risk-longest"].textContent !== "1 dia") throw new Error("singular duration mismatch");
+  if (elements["#risk-percentage-deepest"].textContent !== "-125,00%") throw new Error("missing percentage depth");
+  if (!elements["#risk-longest-detail"].textContent.includes("Em andamento")) throw new Error("missing open episode state");
+
+  metricMode = "pending";
+  elements["#filter-strategy"].value = "Turtle";
+  elements["#filter-strategy"].listeners.change();
+  await flush();
+  if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("old metrics remained visible during a filter change");
+  if (elements["#risk-percentage-deepest"].textContent !== "—") throw new Error("old percentage remained visible");
+  pendingMetrics.shift()({ok: true, status: 200, json: async () => metricPayload});
+  metricMode = "normal";
+  await flush(); await flush();
+
+  metricMode = "pending";
+  const olderMetrics = context.loadMetrics();
+  const newerMetrics = context.loadMetrics();
+  pendingMetrics[1]({ok: true, status: 200, json: async () => ({...metricPayload,
+    monetary_drawdown: {...metricPayload.monetary_drawdown,
+      deepest_episode: {...metricPayload.monetary_drawdown.deepest_episode, depth: -30}},
+    percentage_drawdown: {...metricPayload.percentage_drawdown,
+      deepest_episode: {...metricPayload.percentage_drawdown.deepest_episode, depth: -0.3}}})});
+  await flush();
+  pendingMetrics[0]({ok: true, status: 200, json: async () => metricPayload});
+  await Promise.all([olderMetrics, newerMetrics]);
+  pendingMetrics.length = 0;
+  if (elements["#risk-deepest"].textContent !== "-30,00"
+      || elements["#risk-percentage-deepest"].textContent !== "-30,00%") {
+    throw new Error("stale risk response overwrote the current sample");
+  }
+
+  positionMode = "pending";
+  context.loadPositions();
+  metricMode = "pending";
+  context.loadMetrics();
+  filterMode = "pending";
+  context.loadFilterOptions();
+  state = "unavailable";
+  await interval();
+  pendingPositions[0]({ok: true, status: 200, json: async () => ({items: [{position_id: "stale",
+    strategy: "Turtle", association: "associated", symbol_family: "WIN", direction: "buy",
+    opened_at: null, closed_at: null, status: "closed", realized_pnl: 1}], total: 1})});
+  pendingMetrics.shift()({ok: true, status: 200, json: async () => ({...metricPayload, net_pnl: 999})});
+  pendingFilters[0]({ok: true, status: 200, json: async () => ({strategies: ["Stale"], symbol_families: ["OLD"]})});
+  await flush(); await flush();
+  if (elements["#page-summary"].textContent !== "Projeção indisponível.") throw new Error("stale position escaped terminal state");
+  if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("stale metric escaped terminal state");
+  if (elements["#risk-deepest"].textContent !== "—") throw new Error("stale drawdown escaped terminal state");
+  if (elements["#risk-percentage-deepest"].textContent !== "—") throw new Error("stale percentage escaped terminal state");
+  if (elements["#filter-strategy"].children.some((option) => option.value === "Stale")) throw new Error("stale filter catalog escaped terminal state");
+
+  positionMode = "normal";
+  metricMode = "normal";
+  elements["#date-from"].value = "2026-08-03";
+  elements["#date-to"].value = "2026-08-01";
+  const beforeInvalidDates = positionFetches;
+  elements["#date-from"].listeners.change();
+  await flush();
+  if (positionFetches !== beforeInvalidDates) throw new Error("invalid dates reached API");
+  if (!elements["#table-state"].textContent.includes("data inicial")) throw new Error("missing date validation detail");
+
+  elements["#date-from"].value = "";
+  elements["#date-to"].value = "";
+  elements["#filter-strategy"].value = "Turtle";
+  elements["#filter-association"].value = "unassociated";
+  elements["#filter-association"].listeners.change();
+  await flush();
+  if (elements["#filter-strategy"].value !== "") throw new Error("contradictory strategy was not cleared");
+
+  elements["#filter-strategy"].value = "Turtle";
+  elements["#filter-strategy"].listeners.change();
+  await flush();
+  if (elements["#filter-association"].value !== "all") throw new Error("association was not normalized");
+
+  positionMode = "validation";
+  filterMode = "normal";
+  const before422 = positionFetches;
+  state = "ready";
+  await interval();
+  if (!elements["#table-state"].textContent.includes("não associadas")) throw new Error("API detail was not exposed");
+  if (positionFetches !== before422 + 1) throw new Error("expected one recovery validation request");
+  await interval();
+  if (positionFetches !== before422 + 1) throw new Error("HTTP 422 caused polling retry");
+  clearTimeout(watchdog);
+})().catch((error) => { clearTimeout(watchdog); console.error(error); process.exitCode = 1; });
+"""
+        node_executable = NODE_EXECUTABLE
+        if node_executable is None:
+            self.skipTest("requires Node.js for JavaScript execution")
+        result = subprocess.run(  # nosec B603 -- absolute executable and fixed test script
+            [node_executable, "-e", runner],
+            check=False,
+            capture_output=True,
+            env={"DASHBOARD_PATH": str(Path(dashboard().path))},
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(NODE_EXECUTABLE, "requires Node.js for JavaScript execution")
+    def test_dashboard_synchronizes_filters_pagination_and_async_recovery(self) -> None:
+        """Keep filters, pagination, and async recovery in one dashboard state."""
         runner = r"""
 const fs = require("fs");
 const vm = require("vm");
@@ -99,20 +348,54 @@ class Element {
   addEventListener(name, handler) { this.listeners[name] = handler; }
 }
 const ids = ["service", "configuration", "source", "projection", "source-name",
-  "source-hash", "last-imported-at", "updated-at", "error", "table-state",
-  "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order"];
+  "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
+  "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
+  "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
+  "filter-association", "date-from", "date-to", "metrics-summary", "temporal-metrics-summary", "metrics-state",
+  "metric-sample-size", "metric-winning-trades", "metric-losing-trades",
+  "metric-net-pnl", "metric-gross-profit", "metric-gross-loss", "metric-win-rate",
+  "metric-profit-factor", "metric-payoff", "metric-expectancy",
+  "metric-sharpe-per-position", "metric-sortino-per-position", "metric-sharpe-daily",
+  "metric-sortino-daily", "metric-sharpe-annualized", "metric-sortino-annualized",
+  "reason-sharpe-daily", "reason-sortino-daily", "reason-sharpe-annualized",
+  "reason-sortino-annualized", "risk-deepest", "risk-longest", "risk-deepest-detail", "risk-longest-detail",
+  "risk-percentage-deepest", "risk-percentage-longest", "risk-percentage-deepest-detail", "risk-percentage-longest-detail"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
+elements["#filter-status"].value = "closed";
+elements["#filter-association"].value = "all";
 let state = "ready";
 let interval;
 let positionFetches = 0;
+let filterFetches = 0;
+let filterPayload = {strategies: ["FVG", "Turtle"], symbol_families: ["WDO", "WIN"]};
+let filterMode = "normal";
+let lastPositionUrl = "";
+let metricFetches = 0;
+let lastMetricUrl = "";
 let mode = "retry";
 const pending = [];
 let statusMode = "normal";
 const pendingStatuses = [];
+const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
+  gross_profit: 20, gross_loss: -10, winning_trades: 1, losing_trades: 1,
+  win_rate: 0.5, profit_factor: 2, payoff: 2,
+  expectancy: 5, sharpe_per_position: 0.5, sortino_per_position: 0.5,
+  effective_date_from: "2026-08-01", effective_date_to: "2026-08-02",
+  daily_observation_days: 2, opening_balance_required_days: 2,
+  opening_balance_covered_days: 2, opening_balance_missing_dates: [],
+  opening_balance_non_positive_dates: [], sharpe_daily: 0.4, sortino_daily: 0.3,
+  sharpe_annualized: null, sortino_annualized: null,
+  unavailable_reasons: {}};
+const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: null,
+  gross_profit: null, gross_loss: null, winning_trades: null, losing_trades: null,
+  win_rate: null, profit_factor: null, payoff: null,
+  expectancy: null, sharpe_per_position: null, sortino_per_position: null,
+  unavailable_reasons: {net_pnl: "realized_metrics_unavailable_for_open_status"}};
 const payload = () => ({state, configuration: "valid", source: "available",
   projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
+  timezone: "America/Bahia", projection_revision: state === "ready" ? "revision" : null,
   last_import: state === "ready" ? {source_hash: "same-hash", imported_at: "2026-08-01T00:00:00+00:00"} : null});
 const context = {
   document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
@@ -121,36 +404,90 @@ const context = {
       if (statusMode === "race") return new Promise((resolve) => pendingStatuses.push(resolve));
       return {ok: true, json: async () => payload()};
     }
+    if (url === "/api/filter-options") {
+      filterFetches += 1;
+      if (filterMode === "failure") return {ok: false, json: async () => ({})};
+      return {ok: true, json: async () => filterPayload};
+    }
+    if (url.startsWith("/api/metrics?")) {
+      metricFetches += 1;
+      lastMetricUrl = url;
+      return {ok: true, json: async () => url.includes("status=open") ? openMetricPayload : metricPayload};
+    }
     positionFetches += 1;
+    lastPositionUrl = url;
     if (mode === "retry" && positionFetches === 1) return {ok: false, json: async () => ({})};
     if (mode === "failure") return {ok: false, json: async () => ({})};
     if (mode === "race") return new Promise((resolve) => pending.push(resolve));
-    return {ok: true, json: async () => ({items: [], total: 0})};
+    return {ok: true, json: async () => ({items: [], total: 120})};
   },
   setInterval: (callback) => { interval = callback; return 1; },
   URLSearchParams, Intl, Date, console,
 };
-vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus;", context);
+vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus; globalThis.formatMetric = formatMetric; globalThis.renderMetrics = renderMetrics;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 (async () => {
   await flush(); await flush();
+  if (context.formatMetric("winning_trades", undefined) !== "—") throw new Error("missing metric rendered as NaN");
+  if (filterFetches !== 1) throw new Error(`expected initial filter catalog, got ${filterFetches}`);
+  if (!lastPositionUrl.includes("status=closed")) throw new Error(`missing default closed filter: ${lastPositionUrl}`);
+  if (metricFetches !== 1) throw new Error(`expected initial metrics, got ${metricFetches}`);
+  if (elements["#metric-sample-size"].textContent !== "2") throw new Error("operation count formatting mismatch");
+  if (elements["#metric-winning-trades"].textContent !== "1") throw new Error("winning count formatting mismatch");
+  if (elements["#metric-losing-trades"].textContent !== "1") throw new Error("losing count formatting mismatch");
+  if (elements["#metric-net-pnl"].textContent !== "10,00") throw new Error("metric formatting mismatch");
+  if (elements["#metric-gross-loss"].textContent !== "-10,00") throw new Error("gross loss formatting mismatch");
+  if (elements["#metric-win-rate"].textContent !== "50,00%") throw new Error("percentage formatting mismatch");
+  if (elements["#metric-profit-factor"].textContent !== "2,000") throw new Error("ratio formatting mismatch");
+  if (elements["#metrics-summary"].textContent !== "2 posições realizadas.") throw new Error("count formatting mismatch");
   await interval();
   if (positionFetches !== 2) throw new Error(`expected retry after failed load, got ${positionFetches}`);
+  if (metricFetches !== 2) throw new Error(`expected metrics with retry, got ${metricFetches}`);
   state = "unavailable";
   await interval();
   if (elements["#page-summary"].textContent !== "Projeção indisponível.") throw new Error("missing unavailable table state");
   if (elements["#table-state"].hidden || !elements["#table-state"].textContent.includes("projeção SQLite está indisponível")) throw new Error("missing unavailable error notice");
   if (!elements["#previous-page"].disabled || !elements["#next-page"].disabled) throw new Error("pagination remains enabled");
   state = "ready";
+  filterMode = "failure";
   await interval();
   if (positionFetches !== 3) throw new Error(`expected recovery fetch, got ${positionFetches}`);
+  filterMode = "normal";
+  await interval();
+  if (filterFetches !== 3) throw new Error(`expected filter retry, got ${filterFetches}`);
+  if (positionFetches !== 4) throw new Error(`expected reload after filter recovery, got ${positionFetches}`);
+  const metricsBeforePagination = metricFetches;
+  elements["#next-page"].listeners.click();
+  await flush();
+  if (!lastPositionUrl.includes("offset=50")) throw new Error(`pagination did not advance: ${lastPositionUrl}`);
+  if (metricFetches !== metricsBeforePagination) throw new Error("pagination reloaded metrics");
+  elements["#filter-strategy"].value = "FVG";
+  elements["#filter-symbol-family"].value = "WIN";
+  elements["#filter-direction"].value = "buy";
+  elements["#filter-association"].value = "associated";
+  elements["#date-from"].value = "2026-08-01";
+  elements["#date-to"].value = "2026-08-31";
+  elements["#filter-strategy"].listeners.change();
+  await flush();
+  for (const token of ["strategy=FVG", "symbol_family=WIN", "direction=buy",
+    "association=associated", "date_from=2026-08-01", "date_to=2026-08-31", "offset=0"]) {
+    if (!lastPositionUrl.includes(token)) throw new Error(`missing filter ${token}: ${lastPositionUrl}`);
+  }
+  for (const token of ["strategy=FVG", "symbol_family=WIN", "direction=buy",
+    "association=associated", "date_from=2026-08-01", "date_to=2026-08-31"]) {
+    if (!lastMetricUrl.includes(token)) throw new Error(`missing metric filter ${token}: ${lastMetricUrl}`);
+  }
+  if (lastMetricUrl.includes("offset=") || lastMetricUrl.includes("sort_by=")) throw new Error(`table state leaked into metrics: ${lastMetricUrl}`);
   if (elements["#table-state"].hidden !== true || elements["#table-state"].textContent !== "") throw new Error("stale unavailable notice");
   mode = "failure";
+  const metricsBeforeSort = metricFetches;
   elements["#sort-by"].listeners.change();
   await flush();
+  if (metricFetches !== metricsBeforeSort) throw new Error("sorting reloaded metrics");
   mode = "normal";
   await interval();
-  if (positionFetches !== 5) throw new Error(`expected retry after active position failure, got ${positionFetches}`);
+  if (positionFetches !== 8) throw new Error(`expected retry after active position failure, got ${positionFetches}`);
+  if (elements["#filter-strategy"].value !== "FVG") throw new Error("valid strategy selection was lost");
   mode = "race";
   elements["#sort-by"].value = "opened_at";
   elements["#sort-by"].listeners.change();
@@ -164,14 +501,103 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   if (elements["#positions-body"].children[0].children[0].textContent !== "new") throw new Error("stale response overwrote current table");
   mode = "normal";
   statusMode = "race";
+  elements["#filter-strategy"].value = "Gone";
+  filterPayload = {strategies: ["Turtle"], symbol_families: ["WIN"]};
   const olderStatus = context.loadStatus();
   const newerStatus = context.loadStatus();
   if (pendingStatuses.length !== 2) throw new Error(`expected 2 pending status requests, got ${pendingStatuses.length}`);
-  pendingStatuses[1]({ok: true, json: async () => ({state: "ready", configuration: "valid", source: "available", projection: "available", source_name: "Report.xlsx", last_import: {source_hash: "new-hash", imported_at: "2026-08-02T00:00:00+00:00"}})});
+  pendingStatuses[1]({ok: true, json: async () => ({state: "ready", configuration: "valid", source: "available", projection: "available", source_name: "Report.xlsx", timezone: "America/Bahia", projection_revision: "new-revision", last_import: {source_hash: "same-hash", imported_at: "2026-08-02T00:00:00+00:00"}})});
   await flush();
-  pendingStatuses[0]({ok: true, json: async () => ({state: "unavailable", configuration: "valid", source: "available", projection: "invalid", source_name: "Report.xlsx", last_import: null})});
+  pendingStatuses[0]({ok: true, json: async () => ({state: "unavailable", configuration: "valid", source: "available", projection: "invalid", source_name: "Report.xlsx", timezone: "America/Bahia", projection_revision: null, last_import: null})});
   await Promise.all([olderStatus, newerStatus]);
   if (elements["#service"].textContent !== "pronto") throw new Error("stale status overwrote current state");
+  if (elements["#filter-strategy"].value !== "") throw new Error("removed strategy selection was preserved");
+  statusMode = "normal";
+  elements["#filter-status"].value = "open";
+  elements["#filter-status"].listeners.change();
+  await flush(); await flush();
+  if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("open status displayed realized P&L");
+  if (!elements["#metrics-state"].textContent.includes("indisponíveis")) throw new Error("open status reason is not visible");
+  context.renderMetrics({...metricPayload, profit_factor: null, payoff: null,
+    sharpe_per_position: null, sortino_per_position: null,
+    unavailable_reasons: {profit_factor: "no_losing_positions", payoff: "no_losing_positions",
+      sharpe_per_position: "insufficient_sample", sortino_per_position: "zero_downside_deviation"}});
+  const unavailableCards = {
+    "#metric-profit-factor": "A amostra não contém posições perdedoras.",
+    "#metric-payoff": "A amostra não contém posições perdedoras.",
+    "#metric-sharpe-per-position": "São necessárias pelo menos duas posições realizadas.",
+    "#metric-sortino-per-position": "A amostra não possui dispersão negativa.",
+  };
+  for (const [selector, title] of Object.entries(unavailableCards)) {
+    if (elements[selector].textContent !== "—") throw new Error(`${selector} displayed an unavailable value`);
+    if (elements[selector].title !== title) throw new Error(`${selector} has the wrong unavailable reason`);
+  }
+  if (elements["#metric-net-pnl"].textContent !== "10,00") throw new Error("available metric was cleared");
+  for (const message of ["posições perdedoras", "pelo menos duas", "dispersão negativa"]) {
+    if (!elements["#metrics-state"].textContent.includes(message)) throw new Error(`missing reason: ${message}`);
+  }
+  const legacyPayload = {...metricPayload};
+  delete legacyPayload.daily_observation_days;
+  context.renderMetrics(legacyPayload);
+  for (const [state, expected] of [["empty_sample", "Sem dados"],
+    ["no_drawdown", "Sem drawdown"], ["unavailable", "Indisponível"]]) {
+    context.renderMetrics({...metricPayload, monetary_drawdown: {state,
+      deepest_episode: null, longest_episode: null}});
+    if (elements["#risk-deepest"].textContent !== "—") throw new Error("fabricated episode");
+    if (!elements["#risk-longest-detail"].textContent.includes(expected)) throw new Error("missing risk state");
+  }
+  const recovered = {depth: -20, peak_at: "2026-08-01T12:00:00Z",
+    valley_at: "2026-08-02T12:00:00Z", recovery_at: "2026-08-03T12:00:00Z", duration_days: 2};
+  context.renderMetrics({...metricPayload, monetary_drawdown: {state: "available",
+    deepest_episode: recovered, longest_episode: recovered}});
+  if (elements["#risk-longest"].textContent !== "2 dias") throw new Error("missing civil duration");
+  if (elements["#risk-deepest-detail"].textContent.includes("Em andamento")) throw new Error("recovered episode marked open");
+  if (!elements["#risk-deepest-detail"].textContent.includes("03/08/2026")) throw new Error("missing recovery date");
+  if (!elements["#risk-percentage-deepest-detail"].textContent.includes("não fornecido")) {
+    throw new Error("legacy percentage absence was not reported independently");
+  }
+  const percentRecovered = {...recovered, depth: -0.2};
+  context.renderMetrics({...metricPayload,
+    monetary_drawdown: {state: "available", deepest_episode: recovered, longest_episode: recovered},
+    percentage_drawdown: {state: "available", deepest_episode: percentRecovered, longest_episode: percentRecovered}});
+  if (elements["#risk-percentage-deepest"].textContent !== "-20,00%"
+      || elements["#risk-percentage-longest"].textContent !== "2 dias"
+      || elements["#risk-percentage-longest-detail"].textContent.includes("Em andamento")) {
+    throw new Error("recovered percentage episode was rendered incorrectly");
+  }
+  for (const [state, expected] of [["empty_sample", "Sem dados"],
+    ["no_drawdown", "Sem drawdown"], ["unavailable", "cobertura"]]) {
+    context.renderMetrics({...metricPayload,
+      monetary_drawdown: {state: "available", deepest_episode: recovered, longest_episode: recovered},
+      percentage_drawdown: {state, deepest_episode: null, longest_episode: null},
+      unavailable_reasons: {percentage_drawdown: "invalid_opening_balance_coverage"}});
+    if (elements["#risk-deepest"].textContent !== "-20,00") throw new Error("percentage state cleared monetary risk");
+    if (elements["#risk-percentage-deepest"].textContent !== "—"
+        || !elements["#risk-percentage-longest-detail"].textContent.includes(expected)) {
+      throw new Error("missing percentage state detail");
+    }
+  }
+  context.renderMetrics(legacyPayload);
+  if (!elements["#temporal-metrics-summary"].textContent.includes("não fornecidas")) {
+    throw new Error("legacy backend was presented as real zero coverage");
+  }
+  context.renderMetrics({...metricPayload, sharpe_daily: null, sortino_daily: null,
+    sharpe_annualized: null, sortino_annualized: null,
+    opening_balance_required_days: 2, opening_balance_covered_days: 1,
+    opening_balance_missing_dates: ["2026-08-02"], opening_balance_non_positive_dates: [],
+    unavailable_reasons: {}, temporal_unavailable_reasons: {sharpe_daily: "invalid_opening_balance_coverage",
+      sortino_daily: "invalid_opening_balance_coverage",
+      sharpe_annualized: "invalid_opening_balance_coverage",
+      sortino_annualized: "invalid_opening_balance_coverage"}});
+  if (elements["#metric-sharpe-daily"].title !== "A cobertura do saldo de abertura ajustado é inválida.") {
+    throw new Error("daily coverage reason is not visible");
+  }
+  if (elements["#reason-sharpe-daily"].textContent !== "A cobertura do saldo de abertura ajustado é inválida.") {
+    throw new Error("daily coverage reason is not associated with its card");
+  }
+  if (!elements["#temporal-metrics-summary"].textContent.includes("2026-08-02")) {
+    throw new Error("missing balance date is not visible");
+  }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
         node_executable = NODE_EXECUTABLE
@@ -240,10 +666,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
     def test_health_distinguishes_missing_configuration_source_and_projection(self) -> None:
         """Health should distinguish an absent configuration from other states."""
-        payload = self._health_payload()
-
-        self.assertEqual(payload["status"], "error")
-        self.assertEqual(payload["version"], "0.1.0")
+        payload = self._health_payload_with(status="error", version="0.1.0")
         self.assertEqual(payload["configuration"], "invalid")
         self.assertEqual(payload["source"], "unknown")
         self.assertEqual(payload["projection"], "unavailable")
@@ -254,20 +677,14 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
         self._write_config()
         (self.source_dir / "ReportHistory.xlsx").write_bytes(b"fixture")
 
-        payload = self._health_payload()
-
-        self.assertEqual(payload["configuration"], "valid")
-        self.assertEqual(payload["source"], "available")
+        payload = self._health_payload_with(configuration="valid", source="available")
         self.assertEqual(payload["projection"], "unavailable")
 
     def test_health_reports_valid_configuration_with_missing_source(self) -> None:
         """Health should report a valid configuration and missing source."""
         self._write_config()
 
-        payload = self._health_payload()
-
-        self.assertEqual(payload["configuration"], "valid")
-        self.assertEqual(payload["source"], "missing")
+        payload = self._health_payload_with(configuration="valid", source="missing")
         self.assertEqual(payload["status"], "error")
 
     def test_health_reports_invalid_projection_when_database_is_unreadable(self) -> None:
@@ -276,25 +693,26 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
         database_path = self.data_dir / "algobotdash.sqlite"
         database_path.write_bytes(b"projection")
 
-        payload = self._health_payload()
+        self._health_payload_with(projection="invalid", status="error")
+
+    def test_health_rejects_projection_with_previous_table_shape(self) -> None:
+        """Health should validate the complete current schema, not only imports."""
+        connection = self._open_valid_projection()
+        connection.execute("DROP TABLE transactions")
+        connection.execute("CREATE TABLE transactions (id INTEGER PRIMARY KEY)")
+        payload = self._commit_projection_and_read_health(connection)
 
         self.assertEqual(payload["projection"], "invalid")
         self.assertEqual(payload["status"], "error")
 
     def test_health_reports_valid_projection_and_last_import(self) -> None:
         """Health should expose the latest successful import timestamp."""
-        self._write_config()
-        database_path = self.data_dir / "algobotdash.sqlite"
-        connection = sqlite3.connect(database_path)
-        connection.executescript(SCHEMA)
+        connection = self._open_valid_projection()
         connection.execute(
             "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (1, "ReportHistory.xlsx", "hash", "2026-08-31T10:00:00+00:00", 1, 1, 0, 0),
         )
-        connection.commit()
-        connection.close()
-
-        payload = self._health_payload()
+        payload = self._commit_projection_and_read_health(connection)
 
         self.assertEqual(payload["projection"], "available")
         self.assertEqual(payload["last_imported_at"], "2026-08-31T10:00:00+00:00")

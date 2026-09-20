@@ -178,3 +178,5 @@ class DockerRuntimeTests(unittest.TestCase):
         after_recreation = self._start_and_get_health("up", "-d")
         self.assertEqual(after_recreation["projection"], "available")
         self.assertTrue(after_recreation["last_imported_at"])
+        self.assertEqual(after_recreation["timezone"], "America/Bahia")
+        self.assertTrue(after_recreation["projection_revision"])

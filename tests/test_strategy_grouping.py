@@ -26,7 +26,7 @@ class StrategyGroupingTests(unittest.TestCase):
         self.config_path = self.tmp_path / "config.yaml"
         self.database_path = self.tmp_path / "algobotdash.sqlite"
         self.config_path.write_text(
-            "source:\n  path: ReportHistory.xlsx\nstrategies:\n  groups:\n"
+            "timezone: America/Bahia\nsource:\n  path: ReportHistory.xlsx\nstrategies:\n  groups:\n"
             "    - name: FVG\n      patterns: ['fvg']\n",
             encoding="utf-8",
         )
@@ -45,22 +45,27 @@ class StrategyGroupingTests(unittest.TestCase):
         connection.executescript(SCHEMA)
         connection.execute(
             "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (1, "ReportHistory.xlsx", "hash", "2026-08-01T00:00:00+00:00", 3, 3, 1, 0),
+            (1, "ReportHistory.xlsx", "strategy-hash", "2026-08-01T00:00:00+00:00", 4, 4, 1, 0),
         )
         insert_positions(
             connection,
             [
                 (
                     "win", "FVG", "WIN", "WINQ26", "buy", "2026-08-01T10:00:00+00:00",
-                    "2026-08-01T11:00:00+00:00", "closed", 1, 1, 100, 101, -1, 0, 9, 1,
+                    "2026-08-01T11:00:00+00:00", "closed", 1, 1, 100, 101, -1, 0, 9, 1, 1,
                 ),
                 (
                     "wdo", "FVG", "WDO", "WDOU26", "buy", "2026-08-02T10:00:00+00:00",
-                    "2026-08-02T11:00:00+00:00", "closed", 1, 1, 5000, 5001, -1, 0, 9, 1,
+                    "2026-08-02T11:00:00+00:00", "closed", 1, 1, 5000, 5001, -1, 0, 9, 1, 1,
                 ),
                 (
                     "unknown", None, "WIN", "WINQ26", "buy", "2026-08-03T10:00:00+00:00",
-                    None, "open", 1, 1, 100, None, -1, 0, 0, 1,
+                    None, "open", 1, 1, 100, None, -1, 0, 0, 0, 1,
+                ),
+                (
+                    "unassociated", "Turtle", "WIN", "WINV26", "sell",
+                    "2026-08-04T10:00:00+00:00", "2026-08-04T11:00:00+00:00",
+                    "closed", 1, 1, 100, 99, -1, 0, -1, 0, 1,
                 ),
             ],
         )
@@ -71,7 +76,7 @@ class StrategyGroupingTests(unittest.TestCase):
         """Expose WIN FVG and WDO FVG as distinct analytical identities."""
         self._seed_projection()
 
-        positions = self._request("/api/positions?limit=10")
+        positions = self._request("/api/positions?status=all&limit=10")
         configured_groups = self._request("/api/strategies")
         strategy_keys = self._request("/api/strategy-keys")
 
@@ -80,6 +85,9 @@ class StrategyGroupingTests(unittest.TestCase):
         self.assertEqual(by_id["win"]["strategy_key"], "WIN FVG")
         self.assertEqual(by_id["wdo"]["strategy_key"], "WDO FVG")
         self.assertIsNone(by_id["unknown"]["strategy_key"])
+        self.assertEqual(by_id["unassociated"]["strategy"], "Turtle")
+        self.assertEqual(by_id["unassociated"]["association"], "unassociated")
+        self.assertIsNone(by_id["unassociated"]["strategy_key"])
         self.assertEqual(configured_groups.json(), {"items": [{"name": "FVG"}]})
         self.assertEqual(
             strategy_keys.json(),
@@ -114,6 +122,8 @@ class StrategyGroupingTests(unittest.TestCase):
         content = Path(dashboard().path).read_text(encoding="utf-8")
 
         self.assertIn("<th>ID</th><th>Estratégia</th>", content)
-        self.assertIn('position.strategy || "Não associada"', content)
+        self.assertIn('position.association === "associated"', content)
+        self.assertIn('"Sem estratégia"', content)
+        self.assertIn('"Não associada"', content)
         self.assertNotIn("Estratégia analítica", content)
         self.assertNotIn("position.strategy_key ||", content)

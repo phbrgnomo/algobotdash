@@ -77,6 +77,7 @@ class ImportService:
                 source.name,
                 source_hash,
                 ProjectionData(positions, orders, transactions, rejected, rows_read),
+                self.config.timezone,
                 read_import_history(database),
             )
             os.replace(temporary, database)

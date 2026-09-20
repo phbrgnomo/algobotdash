@@ -4,21 +4,31 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
+from datetime import date
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import ConfigurationError, load_config
 from .environment import load_environment
+from .metrics import (
+    calculate_monetary_drawdown,
+    calculate_percentage_drawdown,
+    calculate_position_metrics,
+    calculate_temporal_metrics,
+    effective_metric_period,
+)
 from .storage import (
+    PositionFilters,
     ProjectionUnavailableError,
-    read_import_history,
+    read_filter_options,
     read_imports,
+    read_metric_sample,
     read_position_orders,
     read_positions,
+    read_projection_metadata,
     read_strategy_keys,
 )
 
@@ -45,8 +55,11 @@ def _health_state() -> dict[str, Any]:
         "configuration": "invalid",
         "source": "unknown",
         "projection": "unavailable",
+        "timezone": None,
+        "projection_revision": None,
     }
 
+    config = None
     try:
         config = load_config(CONFIG_PATH)
     except ConfigurationError as exc:
@@ -58,19 +71,24 @@ def _health_state() -> dict[str, Any]:
         )
     else:
         result["configuration"] = "valid"
+        result["timezone"] = config.timezone.key
         result["source"] = "available" if config.source_path.is_file() else "missing"
 
-    if DATABASE_PATH.is_file():
+    if DATABASE_PATH.is_file() and config is not None:
         try:
-            history = read_import_history(DATABASE_PATH)
-        except (OSError, sqlite3.Error, ValueError) as exc:
+            history, _ = read_imports(
+                DATABASE_PATH, limit=1, offset=0, analysis_timezone=config.timezone
+            )
+            metadata = read_projection_metadata(DATABASE_PATH, config.timezone)
+        except ProjectionUnavailableError as exc:
             result["projection"] = "invalid"
             result["projection_error"] = _error_message(exc)
             logger.warning("não foi possível ler o histórico da projeção: %s", exc)
         else:
             result["projection"] = "available"
+            result["projection_revision"] = metadata.revision
             if history:
-                result["last_imported_at"] = history[-1][3]
+                result["last_imported_at"] = history[0]["imported_at"]
     if (
         result["configuration"] != "valid"
         or result["source"] == "missing"
@@ -93,10 +111,63 @@ def _projection_error(_exc: ProjectionUnavailableError) -> HTTPException:
     )
 
 
+def _runtime_config():
+    """Load the mandatory timezone configuration for analytical endpoints."""
+    try:
+        return load_config(CONFIG_PATH)
+    except ConfigurationError as exc:
+        raise HTTPException(
+            status_code=503, detail={"code": "configuration_unavailable"}
+        ) from exc
+
+
+def _optional_dimension(value: str | None, name: str) -> str | None:
+    """Strip an optional dimension and reject whitespace-only input."""
+    if value is None:
+        return None
+    if normalized := value.strip():
+        return normalized
+    raise HTTPException(
+        status_code=422,
+        detail={"code": "invalid_filter", "field": name},
+    )
+
+
+# The shared public contract has one argument per filter dimension.
+# pylint: disable=too-many-arguments,too-many-positional-arguments
+def _position_filters(
+    strategy: str | None,
+    symbol_family: str | None,
+    direction: str | None,
+    status: str,
+    association: str,
+    date_from: date | None,
+    date_to: date | None,
+) -> PositionFilters:
+    """Normalize and validate filters shared by position-based endpoints."""
+    normalized_strategy = _optional_dimension(strategy, "strategy")
+    normalized_symbol_family = _optional_dimension(symbol_family, "symbol_family")
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(status_code=422, detail={"code": "invalid_date_range"})
+    if normalized_strategy is not None and association == "unassociated":
+        raise HTTPException(status_code=422, detail={"code": "contradictory_filters"})
+    return PositionFilters(
+        strategy=normalized_strategy,
+        symbol_family=normalized_symbol_family,
+        direction=direction,
+        status=status,
+        association=association,
+        date_from=date_from,
+        date_to=date_to,
+    )
+# pylint: enable=too-many-arguments,too-many-positional-arguments
+
+
 def _status_state() -> dict[str, Any]:
     """Return dashboard-facing source and projection state without failing HTTP."""
     health_state = _health_state()
     source_name: str | None = None
+    config = None
     try:
         config = load_config(CONFIG_PATH)
     except ConfigurationError:
@@ -105,9 +176,11 @@ def _status_state() -> dict[str, Any]:
         source_name = config.source_path.name
 
     last_import: dict[str, Any] | None = None
-    if health_state["projection"] == "available":
+    if health_state["projection"] == "available" and config is not None:
         try:
-            history, _ = read_imports(DATABASE_PATH, limit=1, offset=0)
+            history, _ = read_imports(
+                DATABASE_PATH, limit=1, offset=0, analysis_timezone=config.timezone
+            )
         except ProjectionUnavailableError:
             health_state["projection"] = "invalid"
         else:
@@ -128,6 +201,8 @@ def _status_state() -> dict[str, Any]:
         "projection": projection,
         "source_name": source_name,
         "last_import": last_import,
+        "timezone": health_state["timezone"],
+        "projection_revision": health_state["projection_revision"],
     }
 
 
@@ -146,6 +221,8 @@ async def health_endpoint() -> dict[str, Any] | JSONResponse:
     )
 
 
+# FastAPI exposes each query parameter through the endpoint signature.
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
 @app.get("/api/positions")
 async def positions_endpoint(
     limit: int = Query(default=50, ge=1, le=200),
@@ -154,8 +231,19 @@ async def positions_endpoint(
         "opened_at", "closed_at", "realized_pnl", "symbol_family", "status"
     ] = "closed_at",
     sort_order: Literal["asc", "desc"] = "desc",
+    strategy: str | None = None,
+    symbol_family: str | None = None,
+    direction: Literal["buy", "sell"] | None = None,
+    status: Literal["closed", "open", "all"] = "closed",
+    association: Literal["associated", "unassociated", "all"] = "all",
+    date_from: date | None = None,
+    date_to: date | None = None,
 ) -> dict[str, Any]:
-    """Return a page of analytical positions with validated ordering."""
+    """Return a filtered page of analytical positions."""
+    config = _runtime_config()
+    filters = _position_filters(
+        strategy, symbol_family, direction, status, association, date_from, date_to
+    )
     try:
         items, total = read_positions(
             DATABASE_PATH,
@@ -163,17 +251,105 @@ async def positions_endpoint(
             offset=offset,
             sort_by=sort_by,
             sort_order=sort_order,
+            analysis_timezone=config.timezone,
+            filters=filters,
         )
     except ProjectionUnavailableError as exc:
         raise _projection_error(exc) from exc
     return {"items": items, "total": total, "limit": limit, "offset": offset}
+# pylint: enable=too-many-arguments,too-many-positional-arguments,too-many-locals
+
+
+# FastAPI exposes each query parameter through the endpoint signature.
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+@app.get("/api/metrics")
+async def metrics_endpoint(
+    strategy: str | None = None,
+    symbol_family: str | None = None,
+    direction: Literal["buy", "sell"] | None = None,
+    status: Literal["closed", "open", "all"] = "closed",
+    association: Literal["associated", "unassociated", "all"] = "all",
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> dict[str, Any]:
+    """Return metrics for the filtered analytical-position sample."""
+    config = _runtime_config()
+    filters = _position_filters(
+        strategy, symbol_family, direction, status, association, date_from, date_to
+    )
+    try:
+        sample = read_metric_sample(DATABASE_PATH, filters, config.timezone)
+    except ProjectionUnavailableError as exc:
+        raise _projection_error(exc) from exc
+    try:
+        payload = calculate_position_metrics(
+            sample.pnl_values,
+            excluded_open_positions=sample.excluded_open_positions,
+            realized_available=status != "open",
+        )
+        temporal = calculate_temporal_metrics(
+            sample.daily_pnl,
+            sample.opening_balances,
+            date_from=date_from,
+            date_to=date_to,
+            global_first_closed_date=sample.global_first_closed_date,
+            global_last_closed_date=sample.global_last_closed_date,
+            realized_available=status != "open",
+        )
+        temporal_reasons = cast(
+            dict[str, str], temporal.pop("temporal_unavailable_reasons")
+        )
+        payload.update(temporal)
+        position_reasons = cast(dict[str, str], payload["unavailable_reasons"])
+        payload["temporal_unavailable_reasons"] = temporal_reasons
+        period = effective_metric_period(
+            sample.daily_pnl, date_from=date_from, date_to=date_to,
+            global_first_closed_date=sample.global_first_closed_date,
+            global_last_closed_date=sample.global_last_closed_date,
+        )
+        drawdown = calculate_monetary_drawdown(
+            sample.closed_events, period=period,
+            realized_available=status != "open",
+            analysis_timezone=config.timezone,
+        )
+        payload["monetary_drawdown"] = drawdown
+        if drawdown["state"] == "unavailable":
+            position_reasons["monetary_drawdown"] = (
+                "realized_metrics_unavailable_for_open_status"
+                if status == "open" else "numeric_overflow"
+            )
+        percentage, percentage_reason = calculate_percentage_drawdown(
+            sample.closed_events, sample.opening_balances,
+            period=period, realized_available=status != "open",
+            analysis_timezone=config.timezone,
+        )
+        payload["percentage_drawdown"] = percentage
+        if percentage_reason is not None:
+            position_reasons["percentage_drawdown"] = percentage_reason
+        return payload
+    except OverflowError as exc:
+        raise _projection_error(
+            ProjectionUnavailableError("numeric overflow in position metrics")
+        ) from exc
+# pylint: enable=too-many-arguments,too-many-positional-arguments,too-many-locals
+
+
+@app.get("/api/filter-options")
+async def filter_options_endpoint() -> dict[str, list[str]]:
+    """Return observed values for dynamic dashboard filters."""
+    try:
+        return read_filter_options(DATABASE_PATH, _runtime_config().timezone)
+    except ProjectionUnavailableError as exc:
+        raise _projection_error(exc) from exc
 
 
 @app.get("/api/positions/{position_id}/orders")
 async def position_orders_endpoint(position_id: str) -> dict[str, list[dict[str, Any]]]:
     """Return auditable orders belonging to a report position identifier."""
     try:
-        orders = read_position_orders(DATABASE_PATH, position_id)
+        orders = read_position_orders(
+            DATABASE_PATH, position_id, _runtime_config().timezone
+        )
     except ProjectionUnavailableError as exc:
         raise _projection_error(exc) from exc
     if orders is None:
@@ -198,7 +374,7 @@ async def strategies_endpoint() -> dict[str, list[dict[str, str]]]:
 async def strategy_keys_endpoint() -> dict[str, list[dict[str, str]]]:
     """Return symbol-qualified strategy identities present in the projection."""
     try:
-        items = read_strategy_keys(DATABASE_PATH)
+        items = read_strategy_keys(DATABASE_PATH, _runtime_config().timezone)
     except ProjectionUnavailableError as exc:
         raise _projection_error(exc) from exc
     return {"items": items}
@@ -211,7 +387,12 @@ async def imports_endpoint(
 ) -> dict[str, Any]:
     """Return valid import history in reverse chronological order."""
     try:
-        items, total = read_imports(DATABASE_PATH, limit=limit, offset=offset)
+        items, total = read_imports(
+            DATABASE_PATH,
+            limit=limit,
+            offset=offset,
+            analysis_timezone=_runtime_config().timezone,
+        )
     except ProjectionUnavailableError as exc:
         raise _projection_error(exc) from exc
     return {"items": items, "total": total, "limit": limit, "offset": offset}

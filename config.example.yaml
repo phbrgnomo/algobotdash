@@ -1,3 +1,5 @@
+timezone: America/Bahia
+
 source:
   path: ../source/ReportHistory.xlsx
 

@@ -7,6 +7,8 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from openpyxl import load_workbook
@@ -26,6 +28,7 @@ def config(source: Path) -> ImportConfig:
     """Build the standard configuration used by parser tests."""
     return ImportConfig(
         source_path=source,
+        timezone=ZoneInfo("America/Bahia"),
         symbol_prefixes=(("WIN", "WIN"), ("WDO", "WDO")),
         strategy_groups=(
             StrategyGroup("Turtle", ("turtle",)),
@@ -151,6 +154,12 @@ class ImportPipelineTests(unittest.TestCase):
                 "select strategy from positions where position_id = '1'"
             ).fetchone()[0]
         )
+        self.assertEqual(
+            connection.execute(
+                "select is_associated from positions order by position_id"
+            ).fetchall(),
+            [(0,), (0,)],
+        )
         self.assertIsNone(
             connection.execute(
                 "select position_id from orders where order_id = '1001'"
@@ -205,14 +214,15 @@ class ImportPipelineTests(unittest.TestCase):
         connection = sqlite3.connect(database)
         self.assertEqual(
             connection.execute(
-                "select strategy from positions where position_id = '1001'"
-            ).fetchone()[0],
-            "FVG",
+                "select strategy, is_associated from positions where position_id = '1001'"
+            ).fetchone(),
+            ("FVG", 1),
         )
-        self.assertIsNone(
+        self.assertEqual(
             connection.execute(
-                "select strategy from positions where position_id = '2'"
-            ).fetchone()[0]
+                "select strategy, is_associated from positions where position_id = '2'"
+            ).fetchone(),
+            (None, 0),
         )
         connection.close()
 
@@ -232,15 +242,16 @@ class ImportPipelineTests(unittest.TestCase):
 
         self.assertEqual(result.no_comment_count, 2)
         connection = sqlite3.connect(database)
-        self.assertIsNone(
+        self.assertEqual(
             connection.execute(
-                "select strategy from positions where position_id = '1001'"
-            ).fetchone()[0]
+                "select strategy, is_associated from positions where position_id = '1001'"
+            ).fetchone(),
+            (None, 0),
         )
         connection.close()
 
-    def test_read_report_preserves_position_metadata_for_unclassified_order(self) -> None:
-        """An unclassified linked order cannot replace position-derived values."""
+    def test_read_report_marks_matching_unclassified_order_as_associated(self) -> None:
+        """A matching order proves association even without a classified strategy."""
         source = self.tmp_path / "history.xlsx"
         workbook(source, legacy_report=True)
         book = load_workbook(source)
@@ -252,19 +263,91 @@ class ImportPipelineTests(unittest.TestCase):
 
         positions, _, _, _, _ = read_report(source, config(source))
 
+        self.assertEqual(positions[0].comment, "manual order")
+        self.assertIsNone(positions[0].strategy)
+        self.assertTrue(positions[0].is_associated)
+
+    def test_read_report_rejects_order_association_when_symbol_differs(self) -> None:
+        """A matching ticket with another raw symbol cannot supply order metadata."""
+        source = self.tmp_path / "history.xlsx"
+        workbook(source, legacy_report=True)
+        book = load_workbook(source)
+        sheet = book.active
+        if sheet is None:
+            raise RuntimeError("workbook fixture has no active worksheet")
+        sheet["C8"] = "WINV26"
+        book.save(source)
+
+        positions, orders, _, _, _ = read_report(source, config(source))
+
+        self.assertEqual(orders[0].order_id, positions[0].position_id)
+        self.assertNotEqual(orders[0].symbol_raw, positions[0].symbol_raw)
         self.assertEqual(positions[0].comment, "")
         self.assertIsNone(positions[0].strategy)
+        self.assertFalse(positions[0].is_associated)
+
+    def test_refresh_persists_matching_unclassified_order_as_associated(self) -> None:
+        """Persist proven association independently from strategy classification."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "algobotdash.sqlite"
+        workbook(source, legacy_report=True)
+        book = load_workbook(source)
+        sheet = book.active
+        if sheet is None:
+            raise RuntimeError("workbook fixture has no active worksheet")
+        sheet["L8"] = "manual order"
+        book.save(source)
+
+        ImportService(config(source)).refresh(database)
+
+        with sqlite3.connect(database) as connection:
+            persisted = connection.execute(
+                "select strategy, is_associated from positions where position_id = '1001'"
+            ).fetchone()
+        self.assertEqual(persisted, (None, 1))
 
 
     def test_configuration_uses_longest_symbol_prefix(self) -> None:
         """Configuration should prefer the most specific symbol prefix."""
         configured = ImportConfig(
             source_path=Path("history.xlsx"),
+            timezone=ZoneInfo("America/Bahia"),
             symbol_prefixes=(("W", "W"), ("WIN", "WIN")),
             strategy_groups=(),
         )
 
         self.assertEqual(configured.normalize_symbol("WIN$"), "WIN")
+
+    def test_configuration_requires_a_valid_iana_timezone(self) -> None:
+        """Timezone is mandatory because it defines the complete analytical calendar."""
+        for index, (value, message) in enumerate(
+            (
+                (None, "não vazia"),
+                ("", "não vazia"),
+                ("   ", "não vazia"),
+                ("Not/AZone", "IANA inválido"),
+            )
+        ):
+            with self.subTest(value=value):
+                path = self.tmp_path / f"timezone-{index}.yml"
+                prefix = "" if value is None else f"timezone: {value}\n"
+                path.write_text(
+                    prefix + "source:\n  path: history.xlsx\n", encoding="utf-8"
+                )
+                with self.assertRaisesRegex(ConfigurationError, message):
+                    load_config(path)
+
+    def test_configuration_wraps_zoneinfo_value_error(self) -> None:
+        """ZoneInfo implementation failures preserve the public config error."""
+        path = self.tmp_path / "timezone-value-error.yml"
+        path.write_text(
+            "timezone: America/Bahia\nsource:\n  path: history.xlsx\n",
+            encoding="utf-8",
+        )
+
+        with patch("algobotdash.config.ZoneInfo", side_effect=ValueError("invalid")):
+            with self.assertRaisesRegex(ConfigurationError, "IANA inválido"):
+                load_config(path)
 
 
     def test_configuration_rejects_invalid_patterns(self) -> None:
@@ -273,7 +356,8 @@ class ImportPipelineTests(unittest.TestCase):
             with self.subTest(patterns=patterns):
                 path = self.tmp_path / "config.yml"
                 path.write_text(
-                    "source:\n  path: history.xlsx\nstrategies:\n  groups:\n"
+                    "timezone: America/Bahia\nsource:\n  path: history.xlsx\n"
+                    "strategies:\n  groups:\n"
                     f"    - name: Turtle\n      patterns: {patterns!r}\n",
                     encoding="utf-8",
                 )
@@ -286,7 +370,8 @@ class ImportPipelineTests(unittest.TestCase):
         """Configuration should reject empty symbol prefixes."""
         path = self.tmp_path / "config.yml"
         path.write_text(
-            "source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    '': Unknown\n",
+            "timezone: America/Bahia\nsource:\n  path: history.xlsx\n"
+            "symbols:\n  prefixes:\n    '': Unknown\n",
             encoding="utf-8",
         )
 
@@ -298,7 +383,8 @@ class ImportPipelineTests(unittest.TestCase):
         """A symbol prefix must map to a non-blank analytical family."""
         path = self.tmp_path / "config.yml"
         path.write_text(
-            "source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    WIN: '   '\n",
+            "timezone: America/Bahia\nsource:\n  path: history.xlsx\n"
+            "symbols:\n  prefixes:\n    WIN: '   '\n",
             encoding="utf-8",
         )
 
@@ -311,7 +397,8 @@ class ImportPipelineTests(unittest.TestCase):
             with self.subTest(prefixes=prefixes):
                 path = self.tmp_path / "config.yml"
                 path.write_text(
-                    f"source:\n  path: history.xlsx\nsymbols:\n  prefixes:\n    {prefixes}\n",
+                    "timezone: America/Bahia\nsource:\n  path: history.xlsx\n"
+                    f"symbols:\n  prefixes:\n    {prefixes}\n",
                     encoding="utf-8",
                 )
 
@@ -323,7 +410,7 @@ class ImportPipelineTests(unittest.TestCase):
         """A strategy group must have a non-blank name."""
         path = self.tmp_path / "config.yml"
         path.write_text(
-            "source:\n  path: history.xlsx\nstrategies:\n  groups:\n"
+            "timezone: America/Bahia\nsource:\n  path: history.xlsx\nstrategies:\n  groups:\n"
             "    - name: '   '\n      patterns: ['fvg']\n",
             encoding="utf-8",
         )
@@ -361,7 +448,7 @@ class ImportPipelineTests(unittest.TestCase):
         for section, value, message in cases:
             with self.subTest(section=section, value=value):
                 path = self.tmp_path / f"{section}-{len(value)}.yml"
-                prefix = "source:\n  path: history.xlsx\n"
+                prefix = "timezone: America/Bahia\nsource:\n  path: history.xlsx\n"
                 path.write_text(f"{prefix}{section}: {value}\n", encoding="utf-8")
                 with self.assertRaisesRegex(ConfigurationError, message):
                     load_config(path)
@@ -449,26 +536,63 @@ class ImportPipelineTests(unittest.TestCase):
         )
         connection.close()
 
+    def test_refresh_same_source_publishes_a_new_projection_revision(self) -> None:
+        """A rebuilt projection must invalidate dashboard data even with the same hash."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "trades.sqlite"
+        workbook(source)
 
-    def test_refresh_rejects_unsupported_schema_version(self) -> None:
-        """Refresh should reject an unsupported database schema version."""
+        ImportService(config(source)).refresh(database)
+        with sqlite3.connect(database) as connection:
+            first_revision, first_timezone = connection.execute(
+                "SELECT revision, timezone FROM projection_metadata WHERE id = 1"
+            ).fetchone()
+
+        ImportService(config(source)).refresh(database)
+        with sqlite3.connect(database) as connection:
+            second_revision, second_timezone = connection.execute(
+                "SELECT revision, timezone FROM projection_metadata WHERE id = 1"
+            ).fetchone()
+            import_count = connection.execute("SELECT COUNT(*) FROM imports").fetchone()[0]
+
+        self.assertNotEqual(first_revision, second_revision)
+        self.assertEqual((first_timezone, second_timezone), ("America/Bahia", "America/Bahia"))
+        self.assertEqual(import_count, 1)
+
+
+    def test_refresh_rebuilds_previous_shape_without_schema_migration(self) -> None:
+        """Refresh should rebuild analytics while retaining readable import history."""
         tmp_path = self.tmp_path
         source = tmp_path / "history.xlsx"
         database = tmp_path / "trades.sqlite"
         workbook(source)
         connection = sqlite3.connect(database)
-        connection.execute("create table schema_version (version integer primary key)")
-        connection.execute("insert into schema_version values (99)")
-        connection.execute("create table imports (id integer primary key)")
+        connection.execute(
+            "create table imports (id integer primary key, source_name text, "
+            "source_hash text, imported_at text, rows_read integer, "
+            "positions_created integer, no_comment_count integer, rejected_count integer)"
+        )
+        connection.execute(
+            "insert into imports values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, "old.xlsx", "old-hash", "2026-07-01T00:00:00+00:00", 1, 1, 0, 0),
+        )
+        connection.execute("create table positions (id integer primary key)")
         connection.commit()
         connection.close()
 
-        with self.assertRaisesRegex(ValueError, "versão de schema SQLite não suportada"):
-            ImportService(config(source)).refresh(database)
+        ImportService(config(source)).refresh(database)
+
+        connection = sqlite3.connect(database)
+        columns = {
+            row[1] for row in connection.execute("pragma table_info(positions)")
+        }
+        self.assertIn("is_associated", columns)
+        self.assertEqual(connection.execute("select count(*) from imports").fetchone()[0], 2)
+        connection.close()
 
 
-    def test_refresh_rejects_unversioned_database(self) -> None:
-        """Refresh should reject a database without schema metadata."""
+    def test_refresh_rejects_malformed_import_history(self) -> None:
+        """Refresh should not overwrite an unreadable import-history table."""
         tmp_path = self.tmp_path
         source = tmp_path / "history.xlsx"
         database = tmp_path / "trades.sqlite"
@@ -478,8 +602,36 @@ class ImportPipelineTests(unittest.TestCase):
         connection.commit()
         connection.close()
 
-        with self.assertRaisesRegex(ValueError, "schema_version ausente"):
+        with self.assertRaisesRegex(ValueError, "colunas ausentes em imports"):
             ImportService(config(source)).refresh(database)
+
+    def test_refresh_rejects_invalid_prior_import_timestamp(self) -> None:
+        """Refresh should not publish history that makes the projection unreadable."""
+        source = self.tmp_path / "history.xlsx"
+        database = self.tmp_path / "trades.sqlite"
+        workbook(source)
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "create table imports (id integer primary key, source_name text, "
+            "source_hash text, imported_at text, rows_read integer, "
+            "positions_created integer, no_comment_count integer, rejected_count integer)"
+        )
+        connection.execute(
+            "insert into imports values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, "old.xlsx", "old-hash", "invalid", 1, 1, 0, 0),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(ValueError, "imported_at inválido"):
+            ImportService(config(source)).refresh(database)
+
+        connection = sqlite3.connect(database)
+        self.assertEqual(
+            connection.execute("select imported_at from imports").fetchone()[0],
+            "invalid",
+        )
+        connection.close()
 
 
     def test_refresh_rejects_malformed_report_without_mutating_projection(self) -> None:

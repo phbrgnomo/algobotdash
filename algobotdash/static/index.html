@@ -12,17 +12,24 @@
       dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
       dt, small { color: #9eabb4; } dd { margin: 0; overflow-wrap: anywhere; }
       .ok { color: #59d69b; } .warn { color: #f5c15d; } .error { color: #ff7b86; }
-      #error, #table-state { margin-top: 16px; color: #ffb4ba; }
+      #error, #filter-state, #table-state, #metrics-state { margin-top: 16px; color: #ffb4ba; }
       .toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
-      .controls, .pagination { align-items: center; display: flex; gap: 8px; }
-      button, select { background: #24323b; border: 1px solid #50616c; border-radius: 4px; color: inherit; padding: 7px 10px; }
+      .controls, .filters, .pagination { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+      .filters { border: 0; border-top: 1px solid #34414a; margin-top: 16px; padding: 16px 0 0; }
+      .filters legend { color: #9eabb4; padding: 0 8px 0 0; }
+      .filters label { color: #9eabb4; font-size: 14px; }
+      .metrics-grid { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 16px; }
+      .metric-card { background: #24323b; border-radius: 6px; padding: 14px; }
+      .metric-card strong { display: block; font-size: 22px; margin-top: 6px; }
+      .metric-reason { color: #ffb4ba; display: block; margin-top: 6px; }
+      button, input, select { background: #24323b; border: 1px solid #50616c; border-radius: 4px; color: inherit; padding: 7px 10px; }
       button:disabled { cursor: not-allowed; opacity: .5; }
       .table-wrap { overflow-x: auto; }
       table { border-collapse: collapse; margin-top: 16px; min-width: 900px; width: 100%; }
       th, td { border-bottom: 1px solid #34414a; padding: 10px 8px; text-align: left; white-space: nowrap; }
       th { color: #9eabb4; font-weight: 600; }
       .numeric { text-align: right; }
-      @media (max-width: 640px) { dl { grid-template-columns: 1fr; } main { padding: 0 16px; } }
+      @media (max-width: 640px) { dl, .metrics-grid { grid-template-columns: 1fr; } main { padding: 0 16px; } }
     </style>
   </head>
   <body>
@@ -65,7 +72,66 @@
             </select>
           </div>
         </div>
-        <p id="table-state" hidden></p>
+        <fieldset class="filters">
+          <legend>Filtros das posições</legend>
+          <label for="filter-strategy">Estratégia</label>
+          <select id="filter-strategy"><option value="">Todas</option></select>
+          <label for="filter-symbol-family">Símbolo</label>
+          <select id="filter-symbol-family"><option value="">Todos</option></select>
+          <label for="filter-direction">Direção</label>
+          <select id="filter-direction">
+            <option value="">Todas</option><option value="buy">Compra</option><option value="sell">Venda</option>
+          </select>
+          <label for="filter-status">Status</label>
+          <select id="filter-status">
+            <option value="closed" selected>Realizadas</option><option value="open">Abertas</option><option value="all">Todas</option>
+          </select>
+          <label for="filter-association">Associação</label>
+          <select id="filter-association">
+            <option value="all" selected>Todas</option><option value="associated">Associadas</option><option value="unassociated">Não associadas</option>
+          </select>
+          <label for="date-from">De</label><input id="date-from" type="date">
+          <label for="date-to">Até</label><input id="date-to" type="date">
+        </fieldset>
+        <p id="filter-state" aria-live="polite" hidden></p>
+        <section aria-labelledby="metrics-title">
+          <h3 id="metrics-title">Métricas por posição</h3>
+          <small id="metrics-summary">Consultando métricas...</small>
+          <div class="metrics-grid">
+            <div class="metric-card"><small>Qt. de operações</small><strong id="metric-sample-size">—</strong></div>
+            <div class="metric-card"><small>Trades positivos (win)</small><strong id="metric-winning-trades">—</strong></div>
+            <div class="metric-card"><small>Trades negativos (loss)</small><strong id="metric-losing-trades">—</strong></div>
+            <div class="metric-card"><small>P&amp;L líquido</small><strong id="metric-net-pnl">—</strong></div>
+            <div class="metric-card"><small>Ganho bruto</small><strong id="metric-gross-profit">—</strong></div>
+            <div class="metric-card"><small>Perda bruta</small><strong id="metric-gross-loss">—</strong></div>
+            <div class="metric-card"><small>Taxa de acerto</small><strong id="metric-win-rate">—</strong></div>
+            <div class="metric-card"><small>Profit factor</small><strong id="metric-profit-factor">—</strong></div>
+            <div class="metric-card"><small>Payoff</small><strong id="metric-payoff">—</strong></div>
+            <div class="metric-card"><small>Expectância</small><strong id="metric-expectancy">—</strong></div>
+            <div class="metric-card"><small>Sharpe por posição</small><strong id="metric-sharpe-per-position">—</strong></div>
+            <div class="metric-card"><small>Sortino por posição</small><strong id="metric-sortino-per-position">—</strong></div>
+          </div>
+          <h3 id="daily-metrics-title">Métricas diárias</h3>
+          <small id="temporal-metrics-summary">Consultando cobertura do saldo...</small>
+          <div class="metrics-grid">
+            <div class="metric-card"><small>Sharpe diário</small><strong id="metric-sharpe-daily" aria-describedby="reason-sharpe-daily">—</strong><small class="metric-reason" id="reason-sharpe-daily"></small></div>
+            <div class="metric-card"><small>Sortino diário</small><strong id="metric-sortino-daily" aria-describedby="reason-sortino-daily">—</strong><small class="metric-reason" id="reason-sortino-daily"></small></div>
+          </div>
+          <h3 id="annualized-metrics-title">Métricas anualizadas</h3>
+          <div class="metrics-grid">
+            <div class="metric-card"><small>Sharpe anualizado</small><strong id="metric-sharpe-annualized" aria-describedby="reason-sharpe-annualized">—</strong><small class="metric-reason" id="reason-sharpe-annualized"></small></div>
+            <div class="metric-card"><small>Sortino anualizado</small><strong id="metric-sortino-annualized" aria-describedby="reason-sortino-annualized">—</strong><small class="metric-reason" id="reason-sortino-annualized"></small></div>
+          </div>
+          <h3 id="risk-title">Risco</h3>
+          <div class="metrics-grid">
+            <div class="metric-card"><small>Drawdown monetário mais profundo</small><strong id="risk-deepest">—</strong><small id="risk-deepest-detail"></small></div>
+            <div class="metric-card"><small>Drawdown monetário mais longo</small><strong id="risk-longest">—</strong><small id="risk-longest-detail"></small></div>
+            <div class="metric-card"><small>Drawdown percentual mais profundo</small><strong id="risk-percentage-deepest">—</strong><small id="risk-percentage-deepest-detail"></small></div>
+            <div class="metric-card"><small>Drawdown percentual mais longo</small><strong id="risk-percentage-longest">—</strong><small id="risk-percentage-longest-detail"></small></div>
+          </div>
+          <p id="metrics-state" aria-live="polite" hidden></p>
+        </section>
+        <p id="table-state" role="alert" hidden></p>
         <div class="table-wrap">
           <table>
             <thead>
@@ -87,9 +153,20 @@
       const page = {limit: 50, offset: 0, total: 0};
       const sortBy = document.querySelector("#sort-by");
       const sortOrder = document.querySelector("#sort-order");
+      const filterStrategy = document.querySelector("#filter-strategy");
+      const filterSymbolFamily = document.querySelector("#filter-symbol-family");
+      const filterDirection = document.querySelector("#filter-direction");
+      const filterStatus = document.querySelector("#filter-status");
+      const filterAssociation = document.querySelector("#filter-association");
+      const dateFrom = document.querySelector("#date-from");
+      const dateTo = document.querySelector("#date-to");
       let latestImportKey = null;
+      let latestFilterImportKey = null;
+      let analysisTimezone = null;
       let positionRequestGeneration = 0;
+      let metricRequestGeneration = 0;
       let statusRequestGeneration = 0;
+      let filterRequestGeneration = 0;
 
       function label(value) {
         return {valid: "válida", invalid: "inválida", available: "disponível",
@@ -98,11 +175,170 @@
       }
 
       function formatDate(value) {
-        return value ? new Date(value).toLocaleString("pt-BR") : "—";
+        return value && analysisTimezone
+          ? new Intl.DateTimeFormat("pt-BR", {
+              dateStyle: "short", timeStyle: "medium", timeZone: analysisTimezone,
+            }).format(new Date(value))
+          : "—";
       }
 
       function formatPnl(value) {
         return value === null ? "—" : new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 2}).format(value);
+      }
+
+      const metricIds = {
+        sample_size: "#metric-sample-size", winning_trades: "#metric-winning-trades",
+        losing_trades: "#metric-losing-trades",
+        net_pnl: "#metric-net-pnl", gross_profit: "#metric-gross-profit",
+        gross_loss: "#metric-gross-loss", win_rate: "#metric-win-rate",
+        profit_factor: "#metric-profit-factor", payoff: "#metric-payoff",
+        expectancy: "#metric-expectancy", sharpe_per_position: "#metric-sharpe-per-position",
+        sortino_per_position: "#metric-sortino-per-position",
+        sharpe_daily: "#metric-sharpe-daily", sortino_daily: "#metric-sortino-daily",
+        sharpe_annualized: "#metric-sharpe-annualized",
+        sortino_annualized: "#metric-sortino-annualized",
+      };
+
+      const metricReasonLabels = {
+        empty_sample: "A amostra não contém posições realizadas.",
+        insufficient_sample: "São necessárias pelo menos duas posições realizadas.",
+        insufficient_daily_sample: "São necessários pelo menos dois dias úteis.",
+        insufficient_annualized_sample: "São necessários pelo menos 30 dias úteis.",
+        no_winning_positions: "A amostra não contém posições vencedoras.",
+        no_losing_positions: "A amostra não contém posições perdedoras.",
+        zero_standard_deviation: "Os resultados não possuem dispersão.",
+        zero_downside_deviation: "A amostra não possui dispersão negativa.",
+        numeric_overflow: "O cálculo excede o limite numérico disponível.",
+        invalid_opening_balance_coverage: "A cobertura do saldo de abertura ajustado é inválida.",
+        realized_metrics_unavailable_for_open_status: "Métricas realizadas ficam indisponíveis para o filtro de posições abertas.",
+      };
+
+      const temporalReasonIds = {
+        sharpe_daily: "#reason-sharpe-daily", sortino_daily: "#reason-sortino-daily",
+        sharpe_annualized: "#reason-sharpe-annualized",
+        sortino_annualized: "#reason-sortino-annualized",
+      };
+
+      function formatMetric(name, value) {
+        if (!Number.isFinite(value)) return "—";
+        if (["sample_size", "winning_trades", "losing_trades"].includes(name)) {
+          return new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 0}).format(value);
+        }
+        if (["win_rate", "percentage_depth"].includes(name)) {
+          return new Intl.NumberFormat("pt-BR", {style: "percent", minimumFractionDigits: 2,
+            maximumFractionDigits: 2}).format(value);
+        }
+        const digits = ["profit_factor", "payoff", "sharpe_per_position",
+          "sortino_per_position", "sharpe_daily", "sortino_daily",
+          "sharpe_annualized", "sortino_annualized"].includes(name) ? 3 : 2;
+        return new Intl.NumberFormat("pt-BR", {minimumFractionDigits: digits,
+          maximumFractionDigits: digits}).format(value);
+      }
+
+      function renderMetrics(data) {
+        renderDrawdown(data);
+        const positionReasons = data.unavailable_reasons || {};
+        const temporalReasons = data.temporal_unavailable_reasons || {};
+        Object.entries(metricIds).forEach(([name, selector]) => {
+          const element = document.querySelector(selector);
+          element.textContent = formatMetric(name, data[name]);
+          const reasons = temporalReasonIds[name] ? temporalReasons : positionReasons;
+          const reason = reasons[name] ? metricReasonLabels[reasons[name]] : "";
+          element.title = reason;
+          if (temporalReasonIds[name]) {
+            document.querySelector(temporalReasonIds[name]).textContent = reason;
+          }
+        });
+        const excluded = data.excluded_open_positions
+          ? `; ${data.excluded_open_positions} abertas excluídas` : "";
+        document.querySelector("#metrics-summary").textContent =
+          `${data.sample_size} posições realizadas${excluded}.`;
+        const hasTemporalContract = Object.prototype.hasOwnProperty.call(
+          data, "daily_observation_days"
+        );
+        if (!hasTemporalContract) {
+          document.querySelector("#temporal-metrics-summary").textContent =
+            "Métricas temporais não fornecidas por esta versão do backend.";
+        } else {
+          const period = data.effective_date_from && data.effective_date_to
+            ? ` Período: ${data.effective_date_from} a ${data.effective_date_to}.`
+            : " Sem intervalo temporal.";
+          const missing = data.opening_balance_missing_dates?.length
+            ? ` Ausentes: ${data.opening_balance_missing_dates.join(", ")}.` : "";
+          const nonPositive = data.opening_balance_non_positive_dates?.length
+            ? ` Não positivos: ${data.opening_balance_non_positive_dates.join(", ")}.` : "";
+          document.querySelector("#temporal-metrics-summary").textContent =
+            `${data.daily_observation_days} dias úteis; saldo válido em `
+            + `${data.opening_balance_covered_days} de `
+            + `${data.opening_balance_required_days} dias com encerramentos.`
+            + period + missing + nonPositive;
+        }
+        const reasons = [...new Set(Object.values(positionReasons))]
+          .map((reason) => metricReasonLabels[reason] || reason);
+        setNotice("#metrics-state", reasons.join(" "), reasons.length > 0);
+      }
+
+      function clearMetrics(message) {
+        clearDrawdown(message);
+        Object.values(metricIds).forEach((selector) => {
+          const element = document.querySelector(selector);
+          element.textContent = "—";
+          element.title = "";
+        });
+        Object.values(temporalReasonIds).forEach((selector) => {
+          document.querySelector(selector).textContent = "";
+        });
+        const summary = document.querySelector("#metrics-summary");
+        if (summary) summary.textContent = message;
+        const temporalSummary = document.querySelector("#temporal-metrics-summary");
+        if (temporalSummary) temporalSummary.textContent = message;
+        setNotice("#metrics-state", message, true);
+      }
+
+      function clearDrawdown(message) {
+        clearDrawdownCards("risk", message);
+        clearDrawdownCards("risk-percentage", message);
+      }
+
+      function clearDrawdownCards(prefix, message) {
+        for (const name of ["deepest", "longest"]) {
+          document.querySelector(`#${prefix}-${name}`).textContent = "—";
+          document.querySelector(`#${prefix}-${name}-detail`).textContent = message;
+        }
+      }
+
+      function renderDrawdown(data) {
+        renderDrawdownCards(data, "monetary_drawdown", "risk", "depth");
+        renderDrawdownCards(data, "percentage_drawdown", "risk-percentage", "percentage_depth");
+      }
+
+      function formatDuration(days) {
+        return `${days} ${days === 1 ? "dia" : "dias"}`;
+      }
+
+      function renderDrawdownCards(data, field, prefix, depthFormat) {
+        const risk = data[field];
+        if (!risk || risk.state !== "available") {
+          const reason = data.unavailable_reasons?.[field];
+          clearDrawdownCards(prefix, !risk ? "Drawdown não fornecido por esta versão do backend."
+            : {empty_sample: "Sem dados: a amostra não contém posições realizadas.",
+              no_drawdown: "Sem drawdown.",
+              unavailable: `Indisponível: ${metricReasonLabels[reason] || reason || "não foi possível calcular."}`}[risk.state]
+              || "Drawdown indisponível.");
+          return;
+        }
+        const dateLabel = formatDate;
+        for (const name of ["deepest", "longest"]) {
+          const episode = risk[`${name}_episode`];
+          document.querySelector(`#${prefix}-${name}`).textContent = name === "deepest"
+            ? formatMetric(depthFormat, episode.depth) : formatDuration(episode.duration_days);
+          document.querySelector(`#${prefix}-${name}-detail`).textContent =
+            `${name === "deepest" ? formatDuration(episode.duration_days) : formatMetric(depthFormat, episode.depth)}; `
+            + `Pico: ${dateLabel(episode.peak_at)}; Vale: ${dateLabel(episode.valley_at)}; `
+            + `Recuperação: ${dateLabel(episode.recovery_at)}`
+            + (episode.recovery_at === null ? "; Em andamento" : "")
+            + `. Datas em ${analysisTimezone}.`;
+        }
       }
 
       function setNotice(id, message, visible) {
@@ -112,6 +348,7 @@
       }
 
       function renderStatus(data) {
+        analysisTimezone = data.timezone;
         const service = document.querySelector("#service");
         service.textContent = label(data.state);
         service.className = data.state === "ready" ? "ok" : data.state === "empty" ? "warn" : "error";
@@ -123,7 +360,7 @@
         document.querySelector("#source-name").textContent = data.source_name || "—";
         document.querySelector("#source-hash").textContent = data.last_import?.source_hash || "—";
         document.querySelector("#last-imported-at").textContent = formatDate(data.last_import?.imported_at);
-        document.querySelector("#updated-at").textContent = `Atualizado em ${new Date().toLocaleTimeString("pt-BR")}`;
+        document.querySelector("#updated-at").textContent = `Atualizado em ${formatDate(new Date().toISOString())}`;
       }
 
       function renderPositions(data) {
@@ -131,7 +368,9 @@
         const body = document.querySelector("#positions-body");
         body.replaceChildren(...data.items.map((position) => {
           const row = document.createElement("tr");
-          [position.position_id, position.strategy || "Não associada", position.symbol_family || "—",
+          const strategyLabel = position.association === "associated"
+            ? position.strategy || "Sem estratégia" : "Não associada";
+          [position.position_id, strategyLabel, position.symbol_family || "—",
             position.direction, formatDate(position.opened_at), formatDate(position.closed_at),
             position.status, formatPnl(position.realized_pnl)].forEach((value, index) => {
             const cell = document.createElement("td");
@@ -151,13 +390,58 @@
         setNotice("#table-state", "", false);
       }
 
-      async function loadPositions() {
+      function buildFilterQuery() {
+        const query = new URLSearchParams();
+        [["strategy", filterStrategy.value], ["symbol_family", filterSymbolFamily.value],
+          ["direction", filterDirection.value], ["status", filterStatus.value],
+          ["association", filterAssociation.value === "all" ? "" : filterAssociation.value],
+          ["date_from", dateFrom.value], ["date_to", dateTo.value]].forEach(([name, value]) => {
+          if (value) query.set(name, value);
+        });
+        return query;
+      }
+
+      function filterError(response, code) {
+        const messages = {
+          invalid_date_range: "A data inicial deve ser anterior ou igual à data final.",
+          contradictory_filters: "Uma estratégia não pode ser combinada com posições não associadas.",
+        };
+        const error = new Error(messages[code] || `HTTP ${response.status}`);
+        error.retryable = response.status === undefined || response.status >= 500;
+        return error;
+      }
+
+      function validateDateRange() {
+        if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+          return "A data inicial deve ser anterior ou igual à data final.";
+        }
+        return null;
+      }
+
+      async function loadPositions(filterQuery = buildFilterQuery()) {
         const requestGeneration = ++positionRequestGeneration;
-        const query = new URLSearchParams({limit: page.limit, offset: page.offset,
-          sort_by: sortBy.value, sort_order: sortOrder.value});
+        const dateRangeError = validateDateRange();
+        if (dateRangeError) {
+          setNotice("#table-state", `Atenção: ${dateRangeError}`, true);
+          return "handled";
+        }
+        const query = new URLSearchParams(filterQuery);
+        query.set("limit", page.limit);
+        query.set("offset", page.offset);
+        query.set("sort_by", sortBy.value);
+        query.set("sort_order", sortOrder.value);
         try {
           const response = await fetch(`/api/positions?${query}`, {cache: "no-store"});
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          if (!response.ok) {
+            let code = null;
+            try {
+              const payload = await response.json();
+              code = payload.detail?.code || null;
+            } catch (_error) {
+              // A response body is optional; the HTTP status remains useful.
+            }
+            throw filterError(response, code);
+          }
           const data = await response.json();
           if (requestGeneration !== positionRequestGeneration) return false;
           renderPositions(data);
@@ -169,7 +453,102 @@
           setNotice("#table-state", `Atenção: não foi possível consultar posições (${error.message}).`, true);
           document.querySelector("#previous-page").disabled = true;
           document.querySelector("#next-page").disabled = true;
-          latestImportKey = null;
+          if (error.retryable !== false) {
+            latestImportKey = null;
+            return false;
+          }
+          return "handled";
+        }
+      }
+
+      async function loadMetrics(filterQuery = buildFilterQuery()) {
+        const requestGeneration = ++metricRequestGeneration;
+        const dateRangeError = validateDateRange();
+        if (dateRangeError) {
+          clearMetrics(`Métricas indisponíveis (${dateRangeError}).`);
+          return "handled";
+        }
+        const query = new URLSearchParams(filterQuery);
+        try {
+          const response = await fetch(`/api/metrics?${query}`, {cache: "no-store"});
+          if (!response.ok) {
+            let code = null;
+            try {
+              const payload = await response.json();
+              code = payload.detail?.code || null;
+            } catch (_error) {
+              // The status is sufficient when the response has no JSON body.
+            }
+            throw filterError(response, code);
+          }
+          const data = await response.json();
+          if (requestGeneration !== metricRequestGeneration) return false;
+          renderMetrics(data);
+          return true;
+        } catch (error) {
+          if (requestGeneration !== metricRequestGeneration) return false;
+          clearMetrics(`Métricas indisponíveis (${error.message}).`);
+          if (error.retryable !== false) {
+            latestImportKey = null;
+            return false;
+          }
+          return "handled";
+        }
+      }
+
+      async function loadFilteredSample() {
+        if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+          positionRequestGeneration += 1;
+          metricRequestGeneration += 1;
+          const message = "Atenção: a data inicial deve ser anterior ou igual à data final.";
+          setNotice("#table-state", message, true);
+          clearMetrics(message);
+          return "handled";
+        }
+        const filterQuery = buildFilterQuery();
+        document.querySelector("#positions-body").replaceChildren();
+        document.querySelector("#page-summary").textContent = "Consultando posições...";
+        document.querySelector("#previous-page").disabled = true;
+        document.querySelector("#next-page").disabled = true;
+        setNotice("#table-state", "", false);
+        clearMetrics("Consultando métricas...");
+        const [positionsLoaded, metricsLoaded] = await Promise.all([
+          loadPositions(filterQuery), loadMetrics(filterQuery),
+        ]);
+        if (positionsLoaded === true && metricsLoaded === true) return true;
+        if (positionsLoaded === "handled" || metricsLoaded === "handled") return "handled";
+        return false;
+      }
+
+      function replaceDynamicOptions(select, values, allLabel) {
+        const current = select.value;
+        const all = document.createElement("option");
+        all.value = "";
+        all.textContent = allLabel;
+        const options = values.map((value) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = value;
+          return option;
+        });
+        select.replaceChildren(all, ...options);
+        select.value = values.includes(current) ? current : "";
+      }
+
+      async function loadFilterOptions() {
+        const requestGeneration = ++filterRequestGeneration;
+        try {
+          const response = await fetch("/api/filter-options", {cache: "no-store"});
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          if (requestGeneration !== filterRequestGeneration) return false;
+          replaceDynamicOptions(filterStrategy, data.strategies, "Todas");
+          replaceDynamicOptions(filterSymbolFamily, data.symbol_families, "Todos");
+          setNotice("#filter-state", "", false);
+          return true;
+        } catch (error) {
+          if (requestGeneration !== filterRequestGeneration) return false;
+          setNotice("#filter-state", `Atenção: não foi possível atualizar os filtros (${error.message}).`, true);
           return false;
         }
       }
@@ -183,22 +562,44 @@
           if (requestGeneration !== statusRequestGeneration) return;
           renderStatus(data);
           setNotice("#error", "", false);
-          const importKey = data.last_import?.source_hash || null;
-          if (data.state === "ready" && importKey !== latestImportKey) {
-            page.offset = 0;
-            if (await loadPositions()) latestImportKey = importKey;
+          const importKey = data.projection_revision || null;
+          if (data.state === "ready") {
+            if (importKey !== latestFilterImportKey) {
+              const filtersLoaded = await loadFilterOptions();
+              if (requestGeneration !== statusRequestGeneration) return;
+              if (filtersLoaded) {
+                latestFilterImportKey = importKey;
+                if (latestImportKey === importKey) latestImportKey = null;
+              }
+            }
+            if (importKey !== latestImportKey) {
+              page.offset = 0;
+              const loaded = await loadFilteredSample();
+              if (requestGeneration !== statusRequestGeneration) return;
+              if (loaded === true || loaded === "handled") latestImportKey = importKey;
+            }
           }
           if (data.state === "empty") {
+            positionRequestGeneration += 1;
+            metricRequestGeneration += 1;
+            filterRequestGeneration += 1;
             latestImportKey = null;
+            latestFilterImportKey = null;
             renderPositions({items: [], total: 0});
+            clearMetrics("Nenhuma importação válida.");
           }
           if (data.state === "unavailable") {
+            positionRequestGeneration += 1;
+            metricRequestGeneration += 1;
+            filterRequestGeneration += 1;
             latestImportKey = null;
+            latestFilterImportKey = null;
             document.querySelector("#positions-body").replaceChildren();
             document.querySelector("#page-summary").textContent = "Projeção indisponível.";
             document.querySelector("#previous-page").disabled = true;
             document.querySelector("#next-page").disabled = true;
             setNotice("#table-state", "Atenção: a projeção SQLite está indisponível.", true);
+            clearMetrics("Projeção indisponível.");
           }
         } catch (error) {
           if (requestGeneration !== statusRequestGeneration) return;
@@ -208,6 +609,20 @@
 
       sortBy.addEventListener("change", () => { page.offset = 0; loadPositions(); });
       sortOrder.addEventListener("change", () => { page.offset = 0; loadPositions(); });
+      [filterStrategy, filterSymbolFamily, filterDirection, filterStatus,
+        filterAssociation, dateFrom, dateTo].forEach((control) => {
+        control.addEventListener("change", () => {
+          if (control === filterAssociation && filterAssociation.value === "unassociated") {
+            filterStrategy.value = "";
+          }
+          if (control === filterStrategy && filterStrategy.value
+              && filterAssociation.value === "unassociated") {
+            filterAssociation.value = "all";
+          }
+          page.offset = 0;
+          loadFilteredSample();
+        });
+      });
       document.querySelector("#previous-page").addEventListener("click", () => {
         page.offset = Math.max(0, page.offset - page.limit); loadPositions();
       });
