@@ -106,6 +106,14 @@ _Avoid_: ignorado, descartado
 Processo explícito que lê a fonte canônica, reconstrói a projeção SQLite e informa o resultado da operação sem invalidar a última projeção válida em caso de erro.
 _Avoid_: sincronização silenciosa
 
+**Operação de atualização**:
+Tentativa assíncrona identificada e persistida fora da projeção substituível, com estado, etapa, horários, resumo ou erro. Uma operação interrompida é reconciliada pela revisão que pretendia publicar.
+_Avoid_: confundir tentativa de atualização com importação válida
+
+**Exclusão de atualização**:
+Bloqueio por caminho da projeção que impede importações simultâneas pelo dashboard, API ou CLI, inclusive quando partem de processos distintos.
+_Avoid_: proteção limitada a uma requisição ou processo
+
 **Métrica**:
 Resultado calculado sobre as posições analíticas normalizadas e recalculado conforme o filtro solicitado.
 _Avoid_: valor pré-calculado permanente

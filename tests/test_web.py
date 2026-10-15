@@ -1,4 +1,5 @@
 """Tests for dashboard endpoints and health diagnostics."""
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -7,6 +8,8 @@ import shutil
 import sqlite3
 import subprocess  # nosec B404 -- required to execute the fixed Node.js test harness
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -15,12 +18,15 @@ from unittest.mock import patch
 import httpx
 
 from algobotdash.storage import SCHEMA
+from algobotdash.refresh import RefreshOperation, RefreshOperationStore
+from algobotdash.service import ImportSummary
 from algobotdash.web import app, dashboard, health
+from tests.fixture_helpers import workbook
 
 NODE_EXECUTABLE = shutil.which("node")
 
 
-class WebTests(unittest.TestCase):
+class WebTests(unittest.TestCase):  # pylint: disable=too-many-public-methods
     """Verify the dashboard's HTTP-facing behavior."""
     tmp_path: Path = Path()
     config_dir: Path = Path()
@@ -55,6 +61,41 @@ class WebTests(unittest.TestCase):
             f"timezone: America/Bahia\nsource:\n  path: {self.source_dir / 'ReportHistory.xlsx'}\n",
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _request(
+        method: str,
+        path: str,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        """Issue one request through the public ASGI interface."""
+        request_headers = headers
+        if request_headers is None and method == "POST" and path == "/api/refresh":
+            request_headers = {
+                "X-Algobotdash-Request": "refresh",
+                "Origin": "http://localhost",
+            }
+
+        async def request() -> httpx.Response:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                return await client.request(method, path, headers=request_headers)
+
+        return asyncio.run(request())
+
+    def _wait_for_refresh(self, operation_id: str) -> dict[str, Any]:
+        """Poll a refresh operation until it reaches a terminal public state."""
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            response = self._request("GET", f"/api/refresh/{operation_id}")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            if payload["state"] in {"completed", "error"}:
+                return payload
+            time.sleep(0.01)
+        self.fail("refresh operation did not finish")
 
     def _health_payload(self) -> dict[str, Any]:
         """Read health state using the isolated test paths."""
@@ -99,6 +140,9 @@ class WebTests(unittest.TestCase):
         content = Path(page).read_text(encoding="utf-8")
 
         self.assertIn('fetch("/api/status"', content)
+        self.assertIn('fetch("/api/refresh"', content)
+        self.assertIn('id="refresh-button"', content)
+        self.assertIn('id="refresh-state" aria-live="polite"', content)
         self.assertIn('fetch("/api/filter-options"', content)
         self.assertIn("projection_revision", content)
         self.assertIn("timeZone: analysisTimezone", content)
@@ -147,7 +191,7 @@ class Element {
   append(child) { this.children.push(child); }
   addEventListener(name, handler) { this.listeners[name] = handler; }
 }
-const ids = ["service", "configuration", "source", "projection", "source-name",
+const ids = ["service", "configuration", "source", "projection", "source-name", "refresh-button", "refresh-state",
   "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
   "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
   "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
@@ -167,6 +211,7 @@ elements["#filter-status"].value = "closed";
 elements["#filter-association"].value = "all";
 let interval;
 let state = "ready";
+let refreshOperation = null;
 let positionFetches = 0;
 let positionMode = "normal";
 let metricMode = "normal";
@@ -202,7 +247,8 @@ const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: 
 const statusPayload = () => ({state, configuration: "valid", source: "available",
   projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
   timezone: "America/Bahia", projection_revision: state === "ready" ? "revision" : null,
-  last_import: state === "ready" ? {source_hash: "hash", imported_at: "2026-08-01T00:00:00Z"} : null});
+  last_import: state === "ready" ? {source_hash: "hash", imported_at: "2026-08-01T00:00:00Z"} : null,
+  refresh_operation: refreshOperation});
 const context = {
   document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
   fetch: async (url) => {
@@ -237,6 +283,29 @@ const watchdog = setTimeout(() => {
   if (elements["#risk-longest"].textContent !== "1 dia") throw new Error("singular duration mismatch");
   if (elements["#risk-percentage-deepest"].textContent !== "-125,00%") throw new Error("missing percentage depth");
   if (!elements["#risk-longest-detail"].textContent.includes("Em andamento")) throw new Error("missing open episode state");
+
+  refreshOperation = {operation_id: "job", state: "running", stage: "reading_source",
+    created_at: new Date().toISOString(), started_at: new Date().toISOString(),
+    finished_at: null, summary: null, error: null};
+  await interval();
+  if (!elements["#refresh-button"].disabled
+      || !elements["#refresh-state"].textContent.includes("lendo fonte")) {
+    throw new Error("running refresh is not visible");
+  }
+  refreshOperation = {...refreshOperation, state: "completed", stage: "completed",
+    finished_at: new Date().toISOString()};
+  await interval();
+  if (elements["#refresh-button"].disabled
+      || !elements["#refresh-state"].textContent.includes("concluída")) {
+    throw new Error("completed refresh is not visible");
+  }
+  refreshOperation = {...refreshOperation, state: "error", stage: "error",
+    error: {code: "validation_error", message: "Configuração ambígua"}};
+  await interval();
+  if (!elements["#refresh-state"].textContent.includes("Configuração ambígua")) {
+    throw new Error("refresh error is not visible");
+  }
+  refreshOperation = null;
 
   metricMode = "pending";
   elements["#filter-strategy"].value = "Turtle";
@@ -347,7 +416,7 @@ class Element {
   append(child) { (this.children ||= []).push(child); }
   addEventListener(name, handler) { this.listeners[name] = handler; }
 }
-const ids = ["service", "configuration", "source", "projection", "source-name",
+const ids = ["service", "configuration", "source", "projection", "source-name", "refresh-button", "refresh-state",
   "source-hash", "last-imported-at", "updated-at", "error", "filter-state", "table-state",
   "positions-body", "page-summary", "previous-page", "next-page", "sort-by", "sort-order",
   "filter-strategy", "filter-symbol-family", "filter-direction", "filter-status",
@@ -628,6 +697,280 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["content-type"], "text/html; charset=utf-8")
         self.assertIn("Dashboard local", response.text)
+
+    def test_refresh_api_runs_and_persists_a_successful_operation(self) -> None:
+        """POST returns an ID and its status reaches a durable successful result."""
+        self._write_config()
+        workbook(self.source_dir / "ReportHistory.xlsx")
+
+        with self._paths():
+            response = self._request("POST", "/api/refresh")
+            self.assertEqual(response.status_code, 202)
+            accepted = response.json()
+            result = self._wait_for_refresh(accepted["operation_id"])
+            status = self._request("GET", "/api/status").json()
+
+        self.assertEqual(accepted["status_url"], f"/api/refresh/{accepted['operation_id']}")
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["summary"]["positions_created"], 2)
+        self.assertEqual(status["refresh_operation"]["operation_id"], accepted["operation_id"])
+
+    def test_refresh_api_reports_configuration_failure_without_losing_operation(self) -> None:
+        """Invalid YAML finishes as a queryable controlled error."""
+        (self.config_dir / "config.yaml").write_text("timezone: [", encoding="utf-8")
+
+        with self._paths():
+            response = self._request("POST", "/api/refresh")
+            result = self._wait_for_refresh(response.json()["operation_id"])
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(result["state"], "error")
+        self.assertEqual(result["error"]["code"], "configuration_error")
+        self.assertIn("interpretar", result["error"]["message"])
+
+    def test_refresh_recovers_when_terminal_state_write_fails_after_publication(self) -> None:
+        """Published data reconciles as success with its prepared summary."""
+        self._write_config()
+        workbook(self.source_dir / "ReportHistory.xlsx")
+        original_complete = RefreshOperationStore.complete
+        failed_once = False
+
+        def flaky_complete(
+            store: RefreshOperationStore,
+            operation_id: str,
+            summary: dict[str, Any] | None = None,
+            *,
+            stage: str = "completed",
+        ) -> None:
+            nonlocal failed_once
+            if not failed_once and stage == "completed":
+                failed_once = True
+                raise sqlite3.OperationalError("injected terminal write failure")
+            original_complete(store, operation_id, summary, stage=stage)
+
+        with self._paths(), patch.object(
+            RefreshOperationStore, "complete", autospec=True, side_effect=flaky_complete
+        ):
+            response = self._request("POST", "/api/refresh")
+            result = self._wait_for_refresh(response.json()["operation_id"])
+
+        self.assertTrue(failed_once)
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["stage"], "completed_after_restart")
+        self.assertEqual(result["summary"]["positions_created"], 2)
+
+    def test_refresh_api_rejects_a_concurrent_attempt(self) -> None:
+        """A second POST receives a conflict while the first owns the import lock."""
+        self._write_config()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_refresh(
+            _service: object,
+            database_path: str | Path,
+            **_kwargs: object,
+        ) -> ImportSummary:
+            entered.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("test refresh was not released")
+            return ImportSummary("hash", 1, 1, 0, 0, Path(database_path))
+
+        with self._paths(), patch(
+            "algobotdash.refresh_runner.ImportService.refresh_with_lock",
+            autospec=True,
+            side_effect=slow_refresh,
+        ):
+            first = self._request("POST", "/api/refresh")
+            self.assertTrue(entered.wait(timeout=2))
+            second = self._request("POST", "/api/refresh")
+            release.set()
+            result = self._wait_for_refresh(first.json()["operation_id"])
+
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json()["detail"]["code"], "refresh_in_progress")
+        self.assertEqual(
+            second.json()["detail"]["operation_id"], first.json()["operation_id"]
+        )
+        self.assertEqual(result["state"], "completed")
+
+    def test_failed_refresh_keeps_previous_projection_queryable(self) -> None:
+        """Queries use the last publication during work and after a failed attempt."""
+        self._write_config()
+        workbook(self.source_dir / "ReportHistory.xlsx")
+        entered = threading.Event()
+        release = threading.Event()
+
+        with self._paths():
+            initial = self._request("POST", "/api/refresh")
+            first_result = self._wait_for_refresh(initial.json()["operation_id"])
+        self.assertEqual(first_result["state"], "completed")
+
+        def failing_refresh(
+            _service: object,
+            _database_path: str | Path,
+            **_kwargs: object,
+        ) -> ImportSummary:
+            entered.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("test refresh was not released")
+            raise ValueError("comentário corresponde a múltiplos grupos")
+
+        with self._paths(), patch(
+            "algobotdash.refresh_runner.ImportService.refresh_with_lock",
+            autospec=True,
+            side_effect=failing_refresh,
+        ):
+            attempt = self._request("POST", "/api/refresh")
+            self.assertTrue(entered.wait(timeout=2))
+            during = self._request("GET", "/api/positions")
+            release.set()
+            result = self._wait_for_refresh(attempt.json()["operation_id"])
+            after = self._request("GET", "/api/positions")
+
+        self.assertEqual(during.status_code, 200)
+        self.assertEqual(after.status_code, 200)
+        self.assertEqual(during.json()["total"], 1)
+        self.assertEqual(after.json()["total"], 1)
+        self.assertEqual(result["state"], "error")
+        self.assertEqual(result["error"]["code"], "validation_error")
+
+    def test_refresh_api_returns_not_found_for_unknown_operation(self) -> None:
+        """Unknown operation IDs have a stable 404 response."""
+        with self._paths():
+            response = self._request("GET", "/api/refresh/unknown")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            response.json()["detail"]["code"], "refresh_operation_not_found"
+        )
+
+    def test_refresh_api_validates_local_origins_without_allowlist_bypass(self) -> None:
+        """Only marked requests from exact loopback origins can start a refresh."""
+        operation = RefreshOperation(
+            operation_id="origin-test",
+            state="queued",
+            stage="queued",
+            created_at="2026-09-20T12:00:00+00:00",
+            started_at=None,
+            finished_at=None,
+            expected_revision="revision",
+            summary={},
+            error_code=None,
+            error_message=None,
+        )
+        with self._paths(), patch(
+            "algobotdash.web.RefreshRunner.start", return_value=operation
+        ):
+            no_origin = self._request(
+                "POST",
+                "/api/refresh",
+                headers={"X-Algobotdash-Request": "refresh"},
+            )
+            localhost = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "http://localhost",
+                },
+            )
+            localhost_port = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "https://localhost:8765",
+                },
+            )
+            ipv4 = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "http://127.0.0.1:8765",
+                },
+            )
+            ipv6 = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "http://[::1]:8765",
+                },
+            )
+            unmarked = self._request("POST", "/api/refresh", headers={})
+            lookalike = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "https://localhost.example.com",
+                },
+            )
+            malformed = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "http://[::1",
+                },
+            )
+            userinfo = self._request(
+                "POST",
+                "/api/refresh",
+                headers={
+                    "X-Algobotdash-Request": "refresh",
+                    "Origin": "http://localhost@example.com",
+                },
+            )
+
+        self.assertEqual(
+            (
+                no_origin.status_code,
+                localhost.status_code,
+                localhost_port.status_code,
+                ipv4.status_code,
+                ipv6.status_code,
+            ),
+            (403, 202, 202, 202, 202),
+        )
+        self.assertEqual(
+            (
+                unmarked.status_code,
+                lookalike.status_code,
+                malformed.status_code,
+                userinfo.status_code,
+            ),
+            (403, 403, 403, 403),
+        )
+        self.assertEqual(
+            lookalike.json()["detail"]["code"], "refresh_request_forbidden"
+        )
+
+    def test_refresh_api_reports_unavailable_platform_lock(self) -> None:
+        """A runtime without fcntl keeps reads available and rejects refresh clearly."""
+        store = RefreshOperationStore.for_database(
+            self.data_dir / "algobotdash.sqlite"
+        )
+        operation = store.create("pending-revision")
+        with self._paths(), patch("algobotdash.refresh._fcntl", None):
+            status = self._request("GET", "/api/status")
+            persisted = self._request(
+                "GET", f"/api/refresh/{operation.operation_id}"
+            )
+            refresh = self._request("POST", "/api/refresh")
+
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(
+            status.json()["refresh_operation"]["operation_id"],
+            operation.operation_id,
+        )
+        self.assertEqual(persisted.status_code, 200)
+        self.assertEqual(persisted.json()["state"], "queued")
+        self.assertEqual(refresh.status_code, 503)
+        self.assertEqual(
+            refresh.json()["detail"]["code"], "refresh_state_unavailable"
+        )
 
     def test_fastapi_health_returns_service_error_for_missing_config(self) -> None:
         """FastAPI health should fail HTTP checks when configuration is absent."""

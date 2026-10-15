@@ -740,7 +740,7 @@ def _transaction_values(
     )
 
 
-# pylint: disable=too-many-arguments,too-many-positional-arguments
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
 def build_projection(
     path: Path,
     source_name: str,
@@ -748,6 +748,7 @@ def build_projection(
     projection: ProjectionData,
     analysis_timezone: ZoneInfo,
     prior_imports: Iterable[ImportHistoryRow] = (),
+    revision: str | None = None,
 ) -> None:
     """Build a complete SQLite projection atomically in the target file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -756,7 +757,7 @@ def build_projection(
         connection.executescript(SCHEMA)
         connection.execute(
             "UPDATE projection_metadata SET revision = ?, timezone = ? WHERE id = 1",
-            (uuid.uuid4().hex, analysis_timezone.key),
+            (revision or uuid.uuid4().hex, analysis_timezone.key),
         )
         positions = list(projection.positions)
         orders = list(projection.orders)
@@ -818,4 +819,4 @@ def build_projection(
         connection.commit()
     finally:
         connection.close()
-# pylint: enable=too-many-arguments,too-many-positional-arguments
+# pylint: enable=too-many-arguments,too-many-positional-arguments,too-many-locals
