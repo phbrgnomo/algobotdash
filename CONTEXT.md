@@ -122,6 +122,22 @@ _Avoid_: valor pré-calculado permanente
 Resultados calculados sobre todas as posições analíticas realizadas que atendem aos filtros, inclusive posições sem estratégia comprovada. Métricas por estratégia consideram somente posições com identidade analítica de estratégia.
 _Avoid_: excluir resultado não classificado do total, atribuir estratégia sem vínculo comprovado
 
+**P&L acumulado**:
+Soma cumulativa do P&L líquido das posições analíticas realizadas da amostra filtrada, com início em zero. Não inclui ajustes de saldo nem representa patrimônio marcado a mercado.
+_Avoid_: curva de capital, saldo da conta, equity sem qualificação
+
+**P&L por período**:
+Soma do P&L líquido das posições analíticas encerradas em um período diário, semanal, mensal ou anual da amostra filtrada.
+_Avoid_: saldo do período, retorno percentual do período
+
+**Total selecionado**:
+Soma do P&L das combinações de símbolo normalizado e estratégia selecionadas, contando cada posição analítica uma única vez.
+_Avoid_: total de toda a carteira quando há seleção parcial, soma de índices de performance
+
+**Sem estratégia comprovada**:
+Categoria analítica residual para posições sem identidade de estratégia comprovada, inclusive registros sem comentário, sem grupo reconhecido ou sem associação comprovada. A categoria permite reconciliar o total sem atribuir uma estratégia artificial.
+_Avoid_: estratégia inferida, resultado descartado
+
 **Data analítica**:
 Data civil no fuso analítico configurado: saída de uma posição realizada e entrada de uma posição aberta; é a referência usada pelo filtro de período.
 _Avoid_: misturar data de entrada e data de saída sem declarar a convenção

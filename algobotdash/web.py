@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .config import ConfigurationError, load_config
@@ -24,6 +24,7 @@ from .metrics import (
 )
 from .refresh import RefreshInProgressError, RefreshLockUnavailableError
 from .refresh_runner import RefreshRunner
+from .series import calculate_chart_series
 from .storage import (
     PositionFilters,
     ProjectionUnavailableError,
@@ -145,11 +146,12 @@ def _runtime_config():
         ) from exc
 
 
-def _optional_dimension(value: str | None, name: str) -> str | None:
-    """Strip an optional dimension and reject whitespace-only input."""
-    if value is None:
+def _optional_dimension(values: list[str] | None, name: str) -> tuple[str, ...] | None:
+    """Normalize repeated dimension values without conflating omission and empty."""
+    if values is None:
         return None
-    if normalized := value.strip():
+    normalized = tuple(dict.fromkeys(value.strip() for value in values))
+    if normalized and all(normalized) and len(normalized) <= 500:
         return normalized
     raise HTTPException(
         status_code=422,
@@ -159,21 +161,24 @@ def _optional_dimension(value: str | None, name: str) -> str | None:
 
 # The shared public contract has one argument per filter dimension.
 # pylint: disable=too-many-arguments,too-many-positional-arguments
-def _position_filters(
-    strategy: str | None,
-    symbol_family: str | None,
-    direction: str | None,
-    status: str,
-    association: str,
-    date_from: date | None,
-    date_to: date | None,
+async def _position_filters(
+    strategy: Annotated[list[str] | None, Query()] = None,
+    symbol_family: Annotated[list[str] | None, Query()] = None,
+    direction: Literal["buy", "sell"] | None = None,
+    status: Literal["closed", "open", "all"] = "closed",
+    association: Literal["associated", "unassociated", "all"] = "all",
+    date_from: date | None = None,
+    date_to: date | None = None,
+    include_unclassified: bool = False,
+    selection_empty: bool = False,
 ) -> PositionFilters:
     """Normalize and validate filters shared by position-based endpoints."""
     normalized_strategy = _optional_dimension(strategy, "strategy")
     normalized_symbol_family = _optional_dimension(symbol_family, "symbol_family")
     if date_from is not None and date_to is not None and date_from > date_to:
         raise HTTPException(status_code=422, detail={"code": "invalid_date_range"})
-    if normalized_strategy is not None and association == "unassociated":
+    if (normalized_strategy is not None and association == "unassociated"
+            and not include_unclassified and not selection_empty):
         raise HTTPException(status_code=422, detail={"code": "contradictory_filters"})
     return PositionFilters(
         strategy=normalized_strategy,
@@ -183,6 +188,8 @@ def _position_filters(
         association=association,
         date_from=date_from,
         date_to=date_to,
+        include_unclassified=include_unclassified,
+        selection_empty=selection_empty,
     )
 # pylint: enable=too-many-arguments,too-many-positional-arguments
 
@@ -258,25 +265,16 @@ async def health_endpoint() -> dict[str, Any] | JSONResponse:
 # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
 @app.get("/api/positions")
 async def positions_endpoint(
+    filters: Annotated[PositionFilters, Depends(_position_filters)],
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     sort_by: Literal[
         "opened_at", "closed_at", "realized_pnl", "symbol_family", "status"
     ] = "closed_at",
     sort_order: Literal["asc", "desc"] = "desc",
-    strategy: str | None = None,
-    symbol_family: str | None = None,
-    direction: Literal["buy", "sell"] | None = None,
-    status: Literal["closed", "open", "all"] = "closed",
-    association: Literal["associated", "unassociated", "all"] = "all",
-    date_from: date | None = None,
-    date_to: date | None = None,
 ) -> dict[str, Any]:
     """Return a filtered page of analytical positions."""
     config = _runtime_config()
-    filters = _position_filters(
-        strategy, symbol_family, direction, status, association, date_from, date_to
-    )
     try:
         items, total = read_positions(
             DATABASE_PATH,
@@ -297,19 +295,11 @@ async def positions_endpoint(
 # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
 @app.get("/api/metrics")
 async def metrics_endpoint(
-    strategy: str | None = None,
-    symbol_family: str | None = None,
-    direction: Literal["buy", "sell"] | None = None,
-    status: Literal["closed", "open", "all"] = "closed",
-    association: Literal["associated", "unassociated", "all"] = "all",
-    date_from: date | None = None,
-    date_to: date | None = None,
+    filters: Annotated[PositionFilters, Depends(_position_filters)],
 ) -> dict[str, Any]:
     """Return metrics for the filtered analytical-position sample."""
     config = _runtime_config()
-    filters = _position_filters(
-        strategy, symbol_family, direction, status, association, date_from, date_to
-    )
+    status, date_from, date_to = filters.status, filters.date_from, filters.date_to
     try:
         sample = read_metric_sample(DATABASE_PATH, filters, config.timezone)
     except ProjectionUnavailableError as exc:
@@ -357,6 +347,7 @@ async def metrics_endpoint(
             analysis_timezone=config.timezone,
         )
         payload["percentage_drawdown"] = percentage
+        payload["projection_revision"] = sample.projection_revision
         if percentage_reason is not None:
             position_reasons["percentage_drawdown"] = percentage_reason
         return payload
@@ -365,6 +356,26 @@ async def metrics_endpoint(
             ProjectionUnavailableError("numeric overflow in position metrics")
         ) from exc
 # pylint: enable=too-many-arguments,too-many-positional-arguments,too-many-locals
+
+
+@app.get("/api/series")
+async def series_endpoint(
+    filters: Annotated[PositionFilters, Depends(_position_filters)],
+    granularity: Literal["day", "week", "month", "year"] = "day",
+) -> dict[str, Any]:
+    """Return unpaginated realized series using the shared analytical sample."""
+    config = _runtime_config()
+    try:
+        sample = read_metric_sample(DATABASE_PATH, filters, config.timezone)
+        return calculate_chart_series(sample, filters, config.timezone, granularity)
+    except ProjectionUnavailableError as exc:
+        raise _projection_error(exc) from exc
+
+
+@app.get("/static/charts.js", include_in_schema=False)
+async def chart_script() -> FileResponse:
+    """Serve the local, dependency-free chart renderer."""
+    return FileResponse(STATIC_INDEX.parent / "charts.js", media_type="text/javascript")
 
 
 @app.get("/api/filter-options")

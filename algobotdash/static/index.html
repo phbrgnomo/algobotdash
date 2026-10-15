@@ -30,6 +30,15 @@
       th, td { border-bottom: 1px solid #34414a; padding: 10px 8px; text-align: left; white-space: nowrap; }
       th { color: #9eabb4; font-weight: 600; }
       .numeric { text-align: right; }
+      .multi-filter { display: grid; gap: 6px; min-width: 200px; flex: 1; }
+      .multi-filter select { min-height: 112px; max-width: 100%; }
+      .multi-filter .controls button { font-size: 12px; padding: 4px 8px; }
+      .chart { margin-top: 16px; min-width: 0; }
+      .chart svg { display: block; width: 100%; height: 260px; touch-action: pan-y; }
+      .chart-inspection { background: #24323b; border-radius: 6px; padding: 12px; overflow-wrap: anywhere; }
+      .chart-inspection strong { display: block; margin-bottom: 6px; }
+      .chart-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 13px; margin: 12px 0; }
+      .chart-legend span { border-left: 4px solid; padding-left: 6px; }
       @media (max-width: 640px) { dl, .metrics-grid { grid-template-columns: 1fr; } main { padding: 0 16px; } }
     </style>
   </head>
@@ -79,10 +88,17 @@
         </div>
         <fieldset class="filters">
           <legend>Filtros das posições</legend>
-          <label for="filter-strategy">Estratégia</label>
-          <select id="filter-strategy"><option value="">Todas</option></select>
-          <label for="filter-symbol-family">Símbolo</label>
-          <select id="filter-symbol-family"><option value="">Todos</option></select>
+          <div class="multi-filter">
+            <label for="filter-symbol-family">Símbolo</label>
+            <select id="filter-symbol-family" multiple size="5" aria-describedby="selection-help"></select>
+            <div class="controls"><button id="symbols-all" type="button">Todos</button><button id="symbols-clear" type="button">Limpar</button></div>
+          </div>
+          <div class="multi-filter">
+            <label for="filter-strategy">Estratégia</label>
+            <select id="filter-strategy" multiple size="5" aria-describedby="selection-help"></select>
+            <div class="controls"><button id="strategies-all" type="button">Todas</button><button id="strategies-clear" type="button">Limpar</button></div>
+          </div>
+          <small id="selection-help">Selecione uma ou mais opções. No computador, use Ctrl ou Cmd para combinar opções. O total soma as combinações selecionadas.</small>
           <label for="filter-direction">Direção</label>
           <select id="filter-direction">
             <option value="">Todas</option><option value="buy">Compra</option><option value="sell">Venda</option>
@@ -99,6 +115,17 @@
           <label for="date-to">Até</label><input id="date-to" type="date">
         </fieldset>
         <p id="filter-state" aria-live="polite" hidden></p>
+        <section aria-labelledby="charts-title">
+          <div class="toolbar"><h3 id="charts-title">P&amp;L realizado e acumulado</h3>
+            <label>Período <select id="chart-granularity"><option value="day">Dia</option><option value="week">Semana</option><option value="month">Mês</option><option value="year">Ano</option></select></label>
+          </div>
+          <small>Barras: resultado do período. Linhas: P&amp;L acumulado desde o início da amostra. Somente posições realizadas.</small>
+          <div id="performance-chart" class="chart" aria-live="polite">Consultando gráficos...</div>
+          <h3>Drawdown monetário</h3><small>Por instante de encerramento, incluindo variações intradiárias.</small>
+          <div id="monetary-chart" class="chart" aria-live="polite"></div>
+          <h3>Drawdown percentual</h3><small>Retornos diários encadeados sobre o saldo de abertura ajustado.</small>
+          <div id="percentage-chart" class="chart" aria-live="polite"></div>
+        </section>
         <section aria-labelledby="metrics-title">
           <h3 id="metrics-title">Métricas por posição</h3>
           <small id="metrics-summary">Consultando métricas...</small>
@@ -154,6 +181,7 @@
         </div>
       </section>
     </main>
+    <script src="/static/charts.js"></script>
     <script>
       const page = {limit: 50, offset: 0, total: 0};
       const sortBy = document.querySelector("#sort-by");
@@ -173,6 +201,12 @@
       let statusRequestGeneration = 0;
       let filterRequestGeneration = 0;
       let refreshPollTimer = null;
+      let seriesRequestGeneration = 0;
+      const selectionModes = new Map([[filterStrategy, "all"], [filterSymbolFamily, "all"]]);
+
+      function selectedValues(select) {
+        return Array.from(select.selectedOptions).map((option) => option.value);
+      }
 
       function label(value) {
         return {valid: "válida", invalid: "inválida", available: "disponível",
@@ -450,13 +484,46 @@
 
       function buildFilterQuery() {
         const query = new URLSearchParams();
-        [["strategy", filterStrategy.value], ["symbol_family", filterSymbolFamily.value],
-          ["direction", filterDirection.value], ["status", filterStatus.value],
+        [[filterStrategy, "strategy"], [filterSymbolFamily, "symbol_family"]].forEach(([select, name]) => {
+          const values = selectedValues(select);
+          if (selectionModes.get(select) === "all" && values.length === select.options.length) return;
+          selectionModes.set(select, "explicit");
+          if (!values.length) query.set("selection_empty", "true");
+          values.forEach((value) => {
+            if (name === "strategy" && value === "unclassified:") query.set("include_unclassified", "true");
+            else query.append(name, name === "strategy" ? value.slice("strategy:".length) : value);
+          });
+        });
+        [["direction", filterDirection.value], ["status", filterStatus.value],
           ["association", filterAssociation.value === "all" ? "" : filterAssociation.value],
           ["date_from", dateFrom.value], ["date_to", dateTo.value]].forEach(([name, value]) => {
           if (value) query.set(name, value);
         });
         return query;
+      }
+
+      function clearCharts(message) {
+        ChartView.clear(message);
+      }
+
+      async function loadSeries(filterQuery = buildFilterQuery()) {
+        const generation = ++seriesRequestGeneration;
+        clearCharts("Consultando gráficos...");
+        const query = new URLSearchParams(filterQuery);
+        query.set("granularity", document.querySelector("#chart-granularity").value);
+        try {
+          const response = await fetch(`/api/series?${query}`, {cache: "no-store"});
+          if (!response.ok) throw filterError(response);
+          const data = await response.json();
+          if (generation !== seriesRequestGeneration) return false;
+          ChartView.render(data);
+          return true;
+        } catch (error) {
+          if (generation !== seriesRequestGeneration) return false;
+          clearCharts(`Gráficos indisponíveis (${error.message}).`);
+          if (error.retryable !== false) { latestImportKey = null; return false; }
+          return "handled";
+        }
       }
 
       function filterError(response, code) {
@@ -558,39 +625,60 @@
         if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
           positionRequestGeneration += 1;
           metricRequestGeneration += 1;
+          seriesRequestGeneration += 1;
           const message = "Atenção: a data inicial deve ser anterior ou igual à data final.";
+          document.querySelector("#positions-body").replaceChildren();
+          document.querySelector("#page-summary").textContent = "Intervalo de datas inválido.";
+          document.querySelector("#previous-page").disabled = true;
+          document.querySelector("#next-page").disabled = true;
           setNotice("#table-state", message, true);
           clearMetrics(message);
+          clearCharts(message);
           return "handled";
         }
         const filterQuery = buildFilterQuery();
+        if (filterQuery.has("selection_empty")) {
+          positionRequestGeneration += 1;
+          metricRequestGeneration += 1;
+          seriesRequestGeneration += 1;
+          renderPositions({items: [], total: 0});
+          clearMetrics("Nenhuma combinação selecionada.");
+          clearCharts("Nenhuma combinação selecionada.");
+          return "handled";
+        }
         document.querySelector("#positions-body").replaceChildren();
         document.querySelector("#page-summary").textContent = "Consultando posições...";
         document.querySelector("#previous-page").disabled = true;
         document.querySelector("#next-page").disabled = true;
         setNotice("#table-state", "", false);
         clearMetrics("Consultando métricas...");
-        const [positionsLoaded, metricsLoaded] = await Promise.all([
-          loadPositions(filterQuery), loadMetrics(filterQuery),
+        const [positionsLoaded, metricsLoaded, seriesLoaded] = await Promise.all([
+          loadPositions(filterQuery), loadMetrics(filterQuery), loadSeries(filterQuery),
         ]);
-        if (positionsLoaded === true && metricsLoaded === true) return true;
-        if (positionsLoaded === "handled" || metricsLoaded === "handled") return "handled";
+        if (positionsLoaded === true && metricsLoaded === true && seriesLoaded === true) return true;
+        if ([positionsLoaded, metricsLoaded, seriesLoaded].includes("handled")) return "handled";
         return false;
       }
 
-      function replaceDynamicOptions(select, values, allLabel) {
-        const current = select.value;
-        const all = document.createElement("option");
-        all.value = "";
-        all.textContent = allLabel;
-        const options = values.map((value) => {
+      function replaceDynamicOptions(select, values) {
+        const current = new Set(selectedValues(select));
+        const selectAll = selectionModes.get(select) === "all";
+        const catalog = select === filterStrategy
+          ? values.map((value) => [`strategy:${value}`, value]).concat([["unclassified:", "Sem estratégia comprovada"]])
+          : values.map((value) => [value, value]);
+        if (!selectAll) {
+          current.forEach((value) => {
+            if (!catalog.some(([key]) => key === value)) catalog.push([value, `${value.replace(/^strategy:/, "")} (indisponível)`]);
+          });
+        }
+        const options = catalog.map(([value, text]) => {
           const option = document.createElement("option");
           option.value = value;
-          option.textContent = value;
+          option.textContent = text;
+          option.selected = selectAll || current.has(value);
           return option;
         });
-        select.replaceChildren(all, ...options);
-        select.value = values.includes(current) ? current : "";
+        select.replaceChildren(...options);
       }
 
       async function loadFilterOptions() {
@@ -600,8 +688,8 @@
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const data = await response.json();
           if (requestGeneration !== filterRequestGeneration) return false;
-          replaceDynamicOptions(filterStrategy, data.strategies, "Todas");
-          replaceDynamicOptions(filterSymbolFamily, data.symbol_families, "Todos");
+          replaceDynamicOptions(filterStrategy, data.strategies);
+          replaceDynamicOptions(filterSymbolFamily, data.symbol_families);
           setNotice("#filter-state", "", false);
           return true;
         } catch (error) {
@@ -638,6 +726,8 @@
             }
           }
           if (data.state === "empty") {
+            seriesRequestGeneration += 1;
+            clearCharts("Nenhuma importação válida.");
             positionRequestGeneration += 1;
             metricRequestGeneration += 1;
             filterRequestGeneration += 1;
@@ -647,6 +737,8 @@
             clearMetrics("Nenhuma importação válida.");
           }
           if (data.state === "unavailable") {
+            seriesRequestGeneration += 1;
+            clearCharts("Projeção indisponível.");
             positionRequestGeneration += 1;
             metricRequestGeneration += 1;
             filterRequestGeneration += 1;
@@ -670,16 +762,25 @@
       [filterStrategy, filterSymbolFamily, filterDirection, filterStatus,
         filterAssociation, dateFrom, dateTo].forEach((control) => {
         control.addEventListener("change", () => {
-          if (control === filterAssociation && filterAssociation.value === "unassociated") {
-            filterStrategy.value = "";
-          }
-          if (control === filterStrategy && filterStrategy.value
-              && filterAssociation.value === "unassociated") {
-            filterAssociation.value = "all";
-          }
+          if (selectionModes.has(control)) selectionModes.set(control, "explicit");
           page.offset = 0;
           loadFilteredSample();
         });
+      });
+      [["symbols", filterSymbolFamily], ["strategies", filterStrategy]].forEach(([name, select]) => {
+        ["all", "clear"].forEach((action) => {
+          document.querySelector(`#${name}-${action}`).addEventListener("click", () => {
+            selectionModes.set(select, action === "all" ? "all" : "explicit");
+            Array.from(select.options).forEach((option) => { option.selected = action === "all"; });
+            page.offset = 0;
+            loadFilteredSample();
+          });
+        });
+      });
+      document.querySelector("#chart-granularity").addEventListener("change", () => {
+        if (validateDateRange()) return;
+        if (buildFilterQuery().has("selection_empty")) return;
+        loadSeries();
       });
       document.querySelector("#previous-page").addEventListener("click", () => {
         page.offset = Math.max(0, page.offset - page.limit); loadPositions();

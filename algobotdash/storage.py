@@ -58,20 +58,32 @@ class ProjectionUnavailableError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class PositionFilters:
+class PositionFilters:  # pylint: disable=too-many-instance-attributes
     """Validated filters shared by position rows and their total count."""
 
-    strategy: str | None = None
-    symbol_family: str | None = None
+    strategy: str | tuple[str, ...] | None = None
+    symbol_family: str | tuple[str, ...] | None = None
     direction: str | None = None
     status: str = "closed"
     association: str = "all"
     date_from: date | None = None
     date_to: date | None = None
+    include_unclassified: bool = False
+    selection_empty: bool = False
 
 
 @dataclass(frozen=True)
-class MetricSample:
+class RealizedPosition:
+    """One closed position classified for additive chart decomposition."""
+
+    at: datetime
+    pnl: Fraction
+    symbol_family: str
+    strategy: str | None
+
+
+@dataclass(frozen=True)
+class MetricSample:  # pylint: disable=too-many-instance-attributes
     """Position outcomes and account-ledger inputs for metric calculation."""
 
     pnl_values: tuple[float, ...]
@@ -81,6 +93,8 @@ class MetricSample:
     global_first_closed_date: date | None
     global_last_closed_date: date | None
     closed_events: tuple[tuple[datetime, Fraction], ...]
+    series_positions: tuple[RealizedPosition, ...] = ()
+    projection_revision: str = ""
 
 
 @dataclass(frozen=True)
@@ -418,13 +432,24 @@ def _position_where(filters: PositionFilters) -> tuple[str, tuple[object, ...]]:
     """Build one parameterized predicate for position rows and count queries."""
     clauses: list[str] = []
     parameters: list[object] = []
-    if filters.strategy is not None:
-        clauses.append("strategy = ?")
-        parameters.append(filters.strategy)
-        clauses.append("is_associated = 1")
+    if filters.selection_empty:
+        clauses.append("0 = 1")
+    if filters.strategy is not None or filters.include_unclassified:
+        strategy_clauses: list[str] = []
+        if filters.strategy is not None:
+            values = (filters.strategy,) if isinstance(filters.strategy, str) else filters.strategy
+            placeholders = ",".join("?" for _ in values)
+            strategy_clauses.append(f"(strategy IN ({placeholders}) AND is_associated = 1)")
+            parameters.extend(values)
+        if filters.include_unclassified:
+            strategy_clauses.append("(strategy IS NULL OR is_associated = 0)")
+        clauses.append("(" + " OR ".join(strategy_clauses) + ")")
     if filters.symbol_family is not None:
-        clauses.append("symbol_family = ?")
-        parameters.append(filters.symbol_family)
+        values = ((filters.symbol_family,) if isinstance(filters.symbol_family, str)
+                  else filters.symbol_family)
+        placeholders = ",".join("?" for _ in values)
+        clauses.append(f"COALESCE(symbol_family, symbol_raw) IN ({placeholders})")
+        parameters.extend(values)
     if filters.direction is not None:
         clauses.append("direction = ?")
         parameters.append(filters.direction)
@@ -459,8 +484,8 @@ def read_filter_options(path: Path, analysis_timezone: ZoneInfo) -> dict[str, li
             symbol_families = [
                 row[0]
                 for row in connection.execute(
-                    "SELECT DISTINCT symbol_family FROM positions "
-                    "WHERE symbol_family IS NOT NULL ORDER BY symbol_family"
+                    "SELECT DISTINCT COALESCE(symbol_family, symbol_raw) AS symbol "
+                    "FROM positions ORDER BY symbol"
                 )
             ]
         except sqlite3.Error as exc:
@@ -538,13 +563,15 @@ def read_metric_sample(
             # The SQL fragment contains only fixed predicates from _position_where;
             # every filter value remains bound through ``parameters``.
             query = (
-                "SELECT status, pnl, exit_at FROM positions "
+                "SELECT status, pnl, exit_at, strategy, is_associated, "
+                "COALESCE(symbol_family, symbol_raw) AS symbol_family FROM positions "
                 f"{where_sql}"  # nosec B608  # nosemgrep
             )
             rows = connection.execute(query, parameters).fetchall()
             pnl_values: list[float] = []
             pnl_by_day: dict[date, list[float]] = {}
             pnl_by_instant: dict[datetime, list[float]] = {}
+            series_positions: list[RealizedPosition] = []
             for row in rows:
                 if row["status"] == "closed":
                     pnl = _finite_number(row["pnl"], "P&L")
@@ -555,6 +582,10 @@ def read_metric_sample(
                     pnl_by_day.setdefault(closed_day, []).append(pnl)
                     closed_at = datetime.fromisoformat(_utc_timestamp(row["exit_at"]) or "")
                     pnl_by_instant.setdefault(closed_at, []).append(pnl)
+                    series_positions.append(RealizedPosition(
+                        closed_at, Fraction(str(pnl)), row["symbol_family"],
+                        row["strategy"] if row["is_associated"] else None,
+                    ))
             open_where_sql, open_parameters = _position_where(
                 replace(filters, status="open")
             )
@@ -583,6 +614,9 @@ def read_metric_sample(
                 (at, sum((Fraction(str(value)) for value in values), Fraction(0)))
                 for at, values in sorted(pnl_by_instant.items())
             )
+            revision = connection.execute(
+                "SELECT revision FROM projection_metadata WHERE id = 1"
+            ).fetchone()[0]
         except (sqlite3.Error, TypeError, ValueError, OverflowError) as exc:
             raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
         return MetricSample(
@@ -593,6 +627,8 @@ def read_metric_sample(
             min(global_closed_days, default=None),
             max(global_closed_days, default=None),
             closed_events,
+            tuple(series_positions),
+            revision,
         )
     finally:
         connection.close()

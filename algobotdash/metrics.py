@@ -231,6 +231,47 @@ def calculate_percentage_drawdown(
         return _empty_drawdown("unavailable"), "numeric_overflow"
     return _select_drawdown(episodes), None
 
+
+def calculate_drawdown_series(
+    events: Sequence[tuple[datetime, float | Fraction]],
+    opening_balances: Mapping[date, float | None],
+    *,
+    period: tuple[date, date] | None,
+    analysis_timezone: ZoneInfo,
+    realized_available: bool = True,
+) -> dict[str, object]:
+    """Publish plot depths from the same exact generators used by the risk cards."""
+    monetary = calculate_monetary_drawdown(
+        events, period=period, analysis_timezone=analysis_timezone,
+        realized_available=realized_available,
+    )
+    percentage, reason = calculate_percentage_drawdown(
+        events, opening_balances, period=period, analysis_timezone=analysis_timezone,
+        realized_available=realized_available,
+    )
+    result: dict[str, object] = {}
+    for name, summary in (("monetary", monetary), ("percentage", percentage)):
+        points: list[dict[str, object]] = []
+        unavailable_reason = reason if name == "percentage" else (
+            "realized_metrics_unavailable_for_open_status" if not realized_available
+            else "numeric_overflow" if summary["state"] == "unavailable" else None
+        )
+        if period is not None and summary["state"] in {"available", "no_drawdown"}:
+            start = datetime.combine(period[0], time.min, analysis_timezone)
+            depths = (_monetary_depths(events, period[0], analysis_timezone)
+                      if name == "monetary" else _percentage_depths(
+                          _daily_closed_events(events, period, analysis_timezone),
+                          opening_balances, period[0], analysis_timezone,
+                      ))
+            points = [{"at": _utc_iso(start), "depth": 0.0}] + [
+                {"at": _utc_iso(at), "depth": float(min(depth, Fraction(0)))}
+                for at, _, depth in depths
+            ]
+        result[name] = {
+            "state": summary["state"], "reason": unavailable_reason, "points": points,
+        }
+    return result
+
 METRIC_NAMES = (
     "net_pnl",
     "gross_profit",
