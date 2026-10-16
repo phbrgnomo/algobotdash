@@ -183,10 +183,15 @@ class WebTests(unittest.TestCase):  # pylint: disable=too-many-public-methods
         runner = r"""
 const fs = require("fs");
 const vm = require("vm");
+const assert = require("node:assert/strict");
 const html = fs.readFileSync(process.env.DASHBOARD_PATH, "utf8");
 const source = html.match(/<script>([\s\S]*)<\/script>/)[1];
 class Element {
-  constructor() { this.value = ""; this.listeners = {}; this.children = []; }
+  constructor() { this._value = ""; this.listeners = {}; this.children = []; }
+  get options() { return this.children; }
+  get selectedOptions() { return this.children.filter(option => option.selected); }
+  get value() { return this.children.length ? this.selectedOptions[0]?.value || "" : this._value; }
+  set value(value) { this._value = value; this.children.forEach(option => { option.selected = option.value === value; }); }
   replaceChildren(...children) { this.children = children; }
   append(child) { this.children.push(child); }
   addEventListener(name, handler) { this.listeners[name] = handler; }
@@ -203,12 +208,14 @@ const ids = ["service", "configuration", "source", "projection", "source-name", 
   "metric-sortino-daily", "metric-sharpe-annualized", "metric-sortino-annualized",
   "reason-sharpe-daily", "reason-sortino-daily", "reason-sharpe-annualized",
   "reason-sortino-annualized", "risk-deepest", "risk-longest", "risk-deepest-detail", "risk-longest-detail",
-  "risk-percentage-deepest", "risk-percentage-longest", "risk-percentage-deepest-detail", "risk-percentage-longest-detail"];
+  "risk-percentage-deepest", "risk-percentage-longest", "risk-percentage-deepest-detail", "risk-percentage-longest-detail",
+  "symbols-all", "symbols-clear", "strategies-all", "strategies-clear", "chart-granularity"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
 elements["#filter-status"].value = "closed";
 elements["#filter-association"].value = "all";
+elements["#chart-granularity"].value = "day";
 let interval;
 let state = "ready";
 let refreshOperation = null;
@@ -219,6 +226,24 @@ let filterMode = "normal";
 const pendingPositions = [];
 const pendingMetrics = [];
 const pendingFilters = [];
+const pendingSeries = [];
+const pendingSeriesBodies = [];
+const seriesSignals = [];
+const seriesRequests = [];
+const chartCalls = [];
+let seriesMode = "normal";
+const seriesPayload = {state: "available", reason: null, projection_revision: "revision",
+  timezone: "America/Bahia", granularity: "day",
+  effective_date_from: "2026-08-01", effective_date_to: "2026-08-01",
+  periods: [{start: "2026-08-01", end: "2026-08-01", partial: false, pnl: 10, cumulative: 10}],
+  strategies: [{id: '["WIN", "Turtle"]', symbol_family: "WIN", strategy: "Turtle",
+    label: "WIN Turtle", points: [{pnl: 10, cumulative: 10}]}],
+  drawdown: {monetary: {state: "no_drawdown", reason: null,
+    points: [{at: "2026-08-01T03:00:00Z", depth: 0}]},
+    percentage: {state: "unavailable", reason: "invalid_opening_balance_coverage", points: []}}};
+const emptySeries = {...seriesPayload, state: "empty_sample", periods: [], strategies: [],
+  drawdown: {monetary: {state: "empty_sample", reason: null, points: []},
+    percentage: {state: "empty_sample", reason: null, points: []}}};
 const metricPayload = {sample_size: 2, excluded_open_positions: 0, net_pnl: 10,
   percentage_drawdown: {state: "available", deepest_episode: {depth: -1.25,
     peak_at: "2026-08-01T03:00:00Z", valley_at: "2026-08-02T12:00:00Z",
@@ -250,12 +275,27 @@ const statusPayload = () => ({state, configuration: "valid", source: "available"
   last_import: state === "ready" ? {source_hash: "hash", imported_at: "2026-08-01T00:00:00Z"} : null,
   refresh_operation: refreshOperation});
 const context = {
+  ChartView: {
+    clear(message) { chartCalls.push({method: "clear", message}); },
+    render(data) { chartCalls.push({method: "render", data}); },
+  },
   document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
-  fetch: async (url) => {
+  fetch: async (url, options = {}) => {
     if (url === "/api/status") return {ok: true, status: 200, json: async () => statusPayload()};
     if (url === "/api/filter-options") {
       if (filterMode === "pending") return new Promise((resolve) => pendingFilters.push(resolve));
       return {ok: true, status: 200, json: async () => ({strategies: ["Turtle"], symbol_families: ["WIN"]})};
+    }
+    if (url.startsWith("/api/series?")) {
+      seriesRequests.push(url);
+      seriesSignals.push(options.signal);
+      if (seriesMode === "pending") return new Promise(resolve => pendingSeries.push(resolve));
+      if (seriesMode === "body_pending") return {ok: true,
+        json: () => new Promise(resolve => pendingSeriesBodies.push(resolve))};
+      if (seriesMode === "error") return {ok: false, status: 503};
+      if (seriesMode === "validation") return {ok: false, status: 422,
+        json: async () => ({detail: {code: "contradictory_filters"}})};
+      return {ok: true, json: async () => seriesMode === "empty" ? emptySeries : seriesPayload};
     }
     if (url.startsWith("/api/metrics?")) {
       if (metricMode === "pending") return new Promise((resolve) => pendingMetrics.push(resolve));
@@ -268,9 +308,9 @@ const context = {
     return {ok: true, status: 200, json: async () => ({items: [], total: 0})};
   },
   setInterval: (callback) => { interval = callback; return 1; },
-  URLSearchParams, Intl, Date, console,
+  URLSearchParams, Intl, Date, console, AbortController, setTimeout, clearTimeout,
 };
-vm.runInNewContext(source + "\nglobalThis.loadPositions = loadPositions; globalThis.loadMetrics = loadMetrics; globalThis.loadFilterOptions = loadFilterOptions;", context);
+vm.runInNewContext(source + "\nglobalThis.loadPositions = loadPositions; globalThis.loadMetrics = loadMetrics; globalThis.loadFilterOptions = loadFilterOptions; globalThis.loadSeries = loadSeries;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const watchdog = setTimeout(() => {
   console.error("dashboard regression test did not complete");
@@ -278,6 +318,14 @@ const watchdog = setTimeout(() => {
 }, 2000);
 (async () => {
   await flush(); await flush();
+
+  assert.deepEqual(chartCalls, [
+    {method: "clear", message: "Consultando gráficos..."},
+    {method: "render", data: seriesPayload},
+  ]);
+  assert.equal(seriesRequests.length, 1);
+  assert.deepEqual([...new URLSearchParams(seriesRequests[0].split("?")[1])],
+    [["projection_revision", "revision"], ["status", "closed"], ["granularity", "day"]]);
 
   if (elements["#risk-deepest"].textContent !== "-10,00") throw new Error("missing monetary depth");
   if (elements["#risk-longest"].textContent !== "1 dia") throw new Error("singular duration mismatch");
@@ -307,8 +355,94 @@ const watchdog = setTimeout(() => {
   }
   refreshOperation = null;
 
+  // Loading clears the previous chart before a series response is available.
+  seriesMode = "pending";
+  const beforeLoading = chartCalls.length;
+  const loadingSeries = context.loadSeries();
+  assert.deepEqual(chartCalls.slice(beforeLoading), [
+    {method: "clear", message: "Consultando gráficos..."},
+  ]);
+  pendingSeries.shift()({ok: true, json: async () => seriesPayload});
+  assert.equal(await loadingSeries, true);
+  assert.deepEqual(chartCalls.at(-1), {method: "render", data: seriesPayload});
+
+  // Empty responses are forwarded unchanged; HTTP failures clear without rendering.
+  seriesMode = "empty";
+  const beforeEmpty = chartCalls.length;
+  assert.equal(await context.loadSeries(), true);
+  assert.deepEqual(chartCalls.slice(beforeEmpty), [
+    {method: "clear", message: "Consultando gráficos..."},
+    {method: "render", data: emptySeries},
+  ]);
+  seriesMode = "error";
+  const beforeError = chartCalls.length;
+  assert.equal(await context.loadSeries(), false);
+  assert.deepEqual(chartCalls.slice(beforeError), [
+    {method: "clear", message: "Consultando gráficos..."},
+    {method: "clear", message: "Gráficos indisponíveis (HTTP 503)."},
+  ]);
+
+  // A late successful response cannot replace a newer chart.
+  seriesMode = "pending";
+  const olderSeries = context.loadSeries();
+  const newerSeries = context.loadSeries();
+  const newSeriesPayload = {...seriesPayload, projection_revision: "new-revision"};
+  pendingSeries[1]({ok: true, json: async () => newSeriesPayload});
+  assert.equal(await newerSeries, true);
+  const beforeStaleSeries = chartCalls.length;
+  pendingSeries[0]({ok: true, json: async () => seriesPayload});
+  assert.equal(await olderSeries, false);
+  assert.equal(chartCalls.length, beforeStaleSeries);
+  assert.equal(chartCalls.at(-1).data, newSeriesPayload);
+  pendingSeries.length = 0;
+  seriesMode = "normal";
+
+  seriesMode = "validation";
+  const beforeValidation = chartCalls.length;
+  assert.equal(await context.loadSeries(), "handled");
+  assert.deepEqual(chartCalls.slice(beforeValidation), [
+    {method: "clear", message: "Consultando gráficos..."},
+    {method: "clear", message: "Gráficos indisponíveis (Uma estratégia não pode ser combinada com posições não associadas.)."},
+  ]);
+
+  // Bound both a stalled response and a stalled JSON body without waiting 15 seconds.
+  for (const mode of ["pending", "body_pending"]) {
+    seriesMode = mode;
+    let expire;
+    const normalSetTimeout = context.setTimeout;
+    const normalClearTimeout = context.clearTimeout;
+    context.setTimeout = (callback, delay) => {
+      assert.equal(delay, 15000);
+      expire = callback;
+      return 0;
+    };
+    let timerCleared = false;
+    context.clearTimeout = () => { timerCleared = true; };
+    const beforeTimeout = chartCalls.length;
+    const stalled = context.loadSeries();
+    await flush();
+    expire();
+    assert.equal(await stalled, false);
+    assert.equal(seriesSignals.at(-1).aborted, true);
+    assert.equal(timerCleared, true);
+    assert.equal(chartCalls.length, beforeTimeout + 2);
+    assert.match(chartCalls.at(-1).message, /Tempo limite excedido/);
+    const afterTimeout = chartCalls.length;
+    if (mode === "pending") pendingSeries.shift()({ok: true, json: async () => seriesPayload});
+    else pendingSeriesBodies.shift()(seriesPayload);
+    await flush();
+    assert.equal(chartCalls.length, afterTimeout);
+    context.setTimeout = normalSetTimeout;
+    context.clearTimeout = normalClearTimeout;
+    seriesMode = "normal";
+    const beforeRetry = seriesRequests.length;
+    await interval();
+    assert.equal(seriesRequests.length, beforeRetry + 1);
+    assert.equal(chartCalls.at(-1).data, seriesPayload);
+  }
+
   metricMode = "pending";
-  elements["#filter-strategy"].value = "Turtle";
+  elements["#filter-strategy"].value = "strategy:Turtle";
   elements["#filter-strategy"].listeners.change();
   await flush();
   if (elements["#metric-net-pnl"].textContent !== "—") throw new Error("old metrics remained visible during a filter change");
@@ -340,8 +474,15 @@ const watchdog = setTimeout(() => {
   context.loadMetrics();
   filterMode = "pending";
   context.loadFilterOptions();
+  seriesMode = "pending";
+  const interruptedSeries = context.loadSeries();
   state = "unavailable";
   await interval();
+  assert.deepEqual(chartCalls.at(-1), {method: "clear", message: "Projeção indisponível."});
+  const beforeInterruptedSeries = chartCalls.length;
+  pendingSeries.shift()({ok: true, json: async () => seriesPayload});
+  assert.equal(await interruptedSeries, false);
+  assert.equal(chartCalls.length, beforeInterruptedSeries);
   pendingPositions[0]({ok: true, status: 200, json: async () => ({items: [{position_id: "stale",
     strategy: "Turtle", association: "associated", symbol_family: "WIN", direction: "buy",
     opened_at: null, closed_at: null, status: "closed", realized_pnl: 1}], total: 1})});
@@ -356,26 +497,30 @@ const watchdog = setTimeout(() => {
 
   positionMode = "normal";
   metricMode = "normal";
+  seriesMode = "normal";
   elements["#date-from"].value = "2026-08-03";
   elements["#date-to"].value = "2026-08-01";
   const beforeInvalidDates = positionFetches;
+  const seriesBeforeInvalidDates = seriesRequests.length;
   elements["#date-from"].listeners.change();
   await flush();
   if (positionFetches !== beforeInvalidDates) throw new Error("invalid dates reached API");
+  assert.equal(seriesRequests.length, seriesBeforeInvalidDates);
+  assert.match(chartCalls.at(-1).message, /data inicial/);
   if (!elements["#table-state"].textContent.includes("data inicial")) throw new Error("missing date validation detail");
 
   elements["#date-from"].value = "";
   elements["#date-to"].value = "";
-  elements["#filter-strategy"].value = "Turtle";
+  elements["#filter-strategy"].value = "strategy:Turtle";
   elements["#filter-association"].value = "unassociated";
   elements["#filter-association"].listeners.change();
   await flush();
-  if (elements["#filter-strategy"].value !== "") throw new Error("contradictory strategy was not cleared");
+  if (elements["#filter-strategy"].value !== "strategy:Turtle") throw new Error("strategy selection changed silently");
 
-  elements["#filter-strategy"].value = "Turtle";
+  elements["#filter-strategy"].value = "strategy:Turtle";
   elements["#filter-strategy"].listeners.change();
   await flush();
-  if (elements["#filter-association"].value !== "all") throw new Error("association was not normalized");
+  if (elements["#filter-association"].value !== "unassociated") throw new Error("association selection changed silently");
 
   positionMode = "validation";
   filterMode = "normal";
@@ -409,9 +554,14 @@ const watchdog = setTimeout(() => {
 const fs = require("fs");
 const vm = require("vm");
 const html = fs.readFileSync(process.env.DASHBOARD_PATH, "utf8");
+const assert = require("node:assert/strict");
 const source = html.match(/<script>([\s\S]*)<\/script>/)[1];
 class Element {
-  constructor() { this.value = ""; this.listeners = {}; }
+  constructor() { this._value = ""; this.listeners = {}; this.children = []; }
+  get options() { return this.children; }
+  get selectedOptions() { return this.children.filter(option => option.selected); }
+  get value() { return this.children.length ? this.selectedOptions[0]?.value || "" : this._value; }
+  set value(value) { this._value = value; this.children.forEach(option => { option.selected = option.value === value; }); }
   replaceChildren(...children) { this.children = children; }
   append(child) { (this.children ||= []).push(child); }
   addEventListener(name, handler) { this.listeners[name] = handler; }
@@ -428,13 +578,19 @@ const ids = ["service", "configuration", "source", "projection", "source-name", 
   "metric-sortino-daily", "metric-sharpe-annualized", "metric-sortino-annualized",
   "reason-sharpe-daily", "reason-sortino-daily", "reason-sharpe-annualized",
   "reason-sortino-annualized", "risk-deepest", "risk-longest", "risk-deepest-detail", "risk-longest-detail",
-  "risk-percentage-deepest", "risk-percentage-longest", "risk-percentage-deepest-detail", "risk-percentage-longest-detail"];
+  "risk-percentage-deepest", "risk-percentage-longest", "risk-percentage-deepest-detail", "risk-percentage-longest-detail",
+  "symbols-all", "symbols-clear", "strategies-all", "strategies-clear", "chart-granularity"];
 const elements = Object.fromEntries(ids.map((id) => ["#" + id, new Element()]));
 elements["#sort-by"].value = "closed_at";
 elements["#sort-order"].value = "desc";
 elements["#filter-status"].value = "closed";
 elements["#filter-association"].value = "all";
+elements["#chart-granularity"].value = "day";
 let state = "ready";
+let publishedRevision = "revision";
+let revisionConflictEndpoint = null;
+let revisionChanges = 0;
+const revisionRequests = [];
 let interval;
 let positionFetches = 0;
 let filterFetches = 0;
@@ -443,6 +599,20 @@ let filterMode = "normal";
 let lastPositionUrl = "";
 let metricFetches = 0;
 let lastMetricUrl = "";
+let lastSeriesUrl = "";
+let lastSeriesPayload;
+let seriesFetches = 0;
+const chartCalls = [];
+const seriesPayload = {state: "available", reason: null, projection_revision: "revision",
+  timezone: "America/Bahia", granularity: "day",
+  effective_date_from: "2026-08-01", effective_date_to: "2026-08-02",
+  periods: [{start: "2026-08-01", end: "2026-08-01", partial: false, pnl: 20, cumulative: 20},
+    {start: "2026-08-02", end: "2026-08-02", partial: false, pnl: -10, cumulative: 10}],
+  strategies: [{id: '["WIN", "FVG"]', symbol_family: "WIN", strategy: "FVG",
+    label: "WIN FVG", points: [{pnl: 20, cumulative: 20}, {pnl: -10, cumulative: 10}]}],
+  drawdown: {monetary: {state: "available", reason: null,
+    points: [{at: "2026-08-01T12:00:00Z", depth: 0}, {at: "2026-08-02T12:00:00Z", depth: -10}]},
+    percentage: {state: "unavailable", reason: "invalid_opening_balance_coverage", points: []}}};
 let mode = "retry";
 const pending = [];
 let statusMode = "normal";
@@ -464,9 +634,13 @@ const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: 
   unavailable_reasons: {net_pnl: "realized_metrics_unavailable_for_open_status"}};
 const payload = () => ({state, configuration: "valid", source: "available",
   projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
-  timezone: "America/Bahia", projection_revision: state === "ready" ? "revision" : null,
+  timezone: "America/Bahia", projection_revision: state === "ready" ? publishedRevision : null,
   last_import: state === "ready" ? {source_hash: "same-hash", imported_at: "2026-08-01T00:00:00+00:00"} : null});
 const context = {
+  ChartView: {
+    clear(message) { chartCalls.push({method: "clear", message}); },
+    render(data) { chartCalls.push({method: "render", data}); },
+  },
   document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
   fetch: async (url) => {
     if (url === "/api/status") {
@@ -477,6 +651,24 @@ const context = {
       filterFetches += 1;
       if (filterMode === "failure") return {ok: false, json: async () => ({})};
       return {ok: true, json: async () => filterPayload};
+    }
+    if (["positions", "metrics", "series"].some(name => url.startsWith(`/api/${name}?`))) {
+      revisionRequests.push(url);
+      if (revisionConflictEndpoint && url.startsWith(`/api/${revisionConflictEndpoint}?`)) {
+        revisionConflictEndpoint = null;
+        publishedRevision = `coherent-${++revisionChanges}`;
+        return {ok: false, status: 409,
+          json: async () => ({detail: {code: "projection_revision_changed"}})};
+      }
+    }
+    if (url.startsWith("/api/series?")) {
+      seriesFetches += 1;
+      lastSeriesUrl = url;
+      const query = new URLSearchParams(url.split("?")[1]);
+      lastSeriesPayload = {...seriesPayload, granularity: query.get("granularity"),
+        projection_revision: query.get("projection_revision")};
+      const data = lastSeriesPayload;
+      return {ok: true, json: async () => data};
     }
     if (url.startsWith("/api/metrics?")) {
       metricFetches += 1;
@@ -491,9 +683,9 @@ const context = {
     return {ok: true, json: async () => ({items: [], total: 120})};
   },
   setInterval: (callback) => { interval = callback; return 1; },
-  URLSearchParams, Intl, Date, console,
+  URLSearchParams, Intl, Date, console, AbortController, setTimeout, clearTimeout,
 };
-vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus; globalThis.formatMetric = formatMetric; globalThis.renderMetrics = renderMetrics;", context);
+vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus; globalThis.formatMetric = formatMetric; globalThis.renderMetrics = renderMetrics; globalThis.loadFilterOptions = loadFilterOptions; globalThis.buildFilterQuery = buildFilterQuery;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 (async () => {
   await flush(); await flush();
@@ -530,7 +722,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   await flush();
   if (!lastPositionUrl.includes("offset=50")) throw new Error(`pagination did not advance: ${lastPositionUrl}`);
   if (metricFetches !== metricsBeforePagination) throw new Error("pagination reloaded metrics");
-  elements["#filter-strategy"].value = "FVG";
+  elements["#filter-strategy"].value = "strategy:FVG";
   elements["#filter-symbol-family"].value = "WIN";
   elements["#filter-direction"].value = "buy";
   elements["#filter-association"].value = "associated";
@@ -545,8 +737,12 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   for (const token of ["strategy=FVG", "symbol_family=WIN", "direction=buy",
     "association=associated", "date_from=2026-08-01", "date_to=2026-08-31"]) {
     if (!lastMetricUrl.includes(token)) throw new Error(`missing metric filter ${token}: ${lastMetricUrl}`);
+    if (!lastSeriesUrl.includes(token)) throw new Error(`missing series filter ${token}: ${lastSeriesUrl}`);
   }
   if (lastMetricUrl.includes("offset=") || lastMetricUrl.includes("sort_by=")) throw new Error(`table state leaked into metrics: ${lastMetricUrl}`);
+  assert.equal(chartCalls.at(-1).method, "render");
+  assert.equal(chartCalls.at(-1).data, lastSeriesPayload);
+  assert.deepEqual(chartCalls.at(-1).data.strategies, seriesPayload.strategies);
   if (elements["#table-state"].hidden !== true || elements["#table-state"].textContent !== "") throw new Error("stale unavailable notice");
   mode = "failure";
   const metricsBeforeSort = metricFetches;
@@ -556,7 +752,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   mode = "normal";
   await interval();
   if (positionFetches !== 8) throw new Error(`expected retry after active position failure, got ${positionFetches}`);
-  if (elements["#filter-strategy"].value !== "FVG") throw new Error("valid strategy selection was lost");
+  if (elements["#filter-strategy"].value !== "strategy:FVG") throw new Error("valid strategy selection was lost");
   mode = "race";
   elements["#sort-by"].value = "opened_at";
   elements["#sort-by"].listeners.change();
@@ -570,7 +766,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   if (elements["#positions-body"].children[0].children[0].textContent !== "new") throw new Error("stale response overwrote current table");
   mode = "normal";
   statusMode = "race";
-  elements["#filter-strategy"].value = "Gone";
+  elements["#filter-strategy"].value = "strategy:FVG";
   filterPayload = {strategies: ["Turtle"], symbol_families: ["WIN"]};
   const olderStatus = context.loadStatus();
   const newerStatus = context.loadStatus();
@@ -580,7 +776,8 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   pendingStatuses[0]({ok: true, json: async () => ({state: "unavailable", configuration: "valid", source: "available", projection: "invalid", source_name: "Report.xlsx", timezone: "America/Bahia", projection_revision: null, last_import: null})});
   await Promise.all([olderStatus, newerStatus]);
   if (elements["#service"].textContent !== "pronto") throw new Error("stale status overwrote current state");
-  if (elements["#filter-strategy"].value !== "") throw new Error("removed strategy selection was preserved");
+  if (elements["#filter-strategy"].value !== "strategy:FVG") throw new Error("removed strategy selection was lost");
+  if (!elements["#filter-strategy"].selectedOptions[0].textContent.includes("indisponível")) throw new Error("removed strategy is not identified");
   statusMode = "normal";
   elements["#filter-status"].value = "open";
   elements["#filter-status"].listeners.change();
@@ -667,6 +864,115 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   if (!elements["#temporal-metrics-summary"].textContent.includes("2026-08-02")) {
     throw new Error("missing balance date is not visible");
   }
+
+  // Exercise native-style multi-selection through the actual change handlers.
+  filterPayload = {strategies: ["FVG", "Turtle"], symbol_families: ["WDO", "WIN"]};
+  await context.loadFilterOptions();
+  elements["#filter-status"].value = "closed";
+  elements["#filter-association"].value = "all";
+  function selectValues(selector, values) {
+    const control = elements[selector];
+    control.options.forEach(option => { option.selected = values.includes(option.value); });
+    control.listeners.change();
+  }
+  function analyticalQueries() {
+    return [lastPositionUrl, lastMetricUrl, lastSeriesUrl]
+      .map(url => new URLSearchParams(url.split("?")[1]));
+  }
+  selectValues("#filter-strategy", ["strategy:FVG", "strategy:Turtle"]);
+  selectValues("#filter-symbol-family", ["WDO", "WIN"]);
+  await flush(); await flush();
+  for (const query of analyticalQueries()) {
+    assert.deepEqual(query.getAll("strategy"), ["FVG", "Turtle"]);
+    assert.deepEqual(query.getAll("symbol_family"), ["WDO", "WIN"]);
+    assert.equal(query.has("include_unclassified"), false);
+    assert.equal(query.has("selection_empty"), false);
+    for (const [name, value] of [["direction", "buy"], ["status", "closed"],
+      ["date_from", "2026-08-01"], ["date_to", "2026-08-31"]]) {
+      assert.deepEqual(query.getAll(name), [value]);
+    }
+  }
+  for (const name of ["limit", "offset", "sort_by", "sort_order"]) {
+    assert.equal(analyticalQueries()[2].has(name), false);
+  }
+  assert.equal(chartCalls.at(-1).data, lastSeriesPayload);
+  assert.equal(chartCalls.at(-1).data.periods.at(-1).cumulative, 10);
+
+  // Period changes reload only series and forward the corresponding payload.
+  const beforeGranularity = [positionFetches, metricFetches, seriesFetches];
+  for (const granularity of ["day", "week", "month", "year"]) {
+    elements["#chart-granularity"].value = granularity;
+    elements["#chart-granularity"].listeners.change();
+    await flush();
+    assert.deepEqual(analyticalQueries()[2].getAll("granularity"), [granularity]);
+    assert.equal(chartCalls.at(-1).data, lastSeriesPayload);
+    assert.equal(chartCalls.at(-1).data.granularity, granularity);
+  }
+  assert.deepEqual([positionFetches, metricFetches, seriesFetches],
+    [beforeGranularity[0], beforeGranularity[1], beforeGranularity[2] + 4]);
+
+  // The residual category has its own flag, never an ordinary strategy value.
+  for (const selected of [["unclassified:"], ["strategy:FVG", "unclassified:"]]) {
+    selectValues("#filter-strategy", selected);
+    await flush();
+    for (const query of analyticalQueries()) {
+      assert.deepEqual(query.getAll("include_unclassified"), ["true"]);
+      assert.deepEqual(query.getAll("strategy"), selected.length === 1 ? [] : ["FVG"]);
+      assert.deepEqual(query.getAll("symbol_family"), ["WDO", "WIN"]);
+      assert.equal(query.has("selection_empty"), false);
+    }
+  }
+
+  // Clearing either selector is explicit emptiness, not an implicit "all" query.
+  for (const [button, selector, restore] of [
+    ["#strategies-clear", "#filter-strategy", "#strategies-all"],
+    ["#symbols-clear", "#filter-symbol-family", "#symbols-all"],
+  ]) {
+    const beforeClear = [positionFetches, metricFetches, seriesFetches];
+    const rendersBeforeClear = chartCalls.filter(call => call.method === "render").length;
+    elements[button].listeners.click();
+    await flush();
+    assert.equal(elements[selector].selectedOptions.length, 0);
+    assert.equal(context.buildFilterQuery().get("selection_empty"), "true");
+    assert.deepEqual([positionFetches, metricFetches, seriesFetches], beforeClear);
+    assert.equal(chartCalls.filter(call => call.method === "render").length, rendersBeforeClear);
+    assert.deepEqual(chartCalls.at(-1), {method: "clear", message: "Nenhuma combinação selecionada."});
+    assert.equal(elements["#metric-net-pnl"].textContent, "—");
+    assert.equal(elements["#positions-body"].children.length, 0);
+    elements[restore].listeners.click();
+    await flush();
+    assert.equal(elements[selector].selectedOptions.length, elements[selector].options.length);
+    assert.equal(context.buildFilterQuery().has("selection_empty"), false);
+    assert.equal(chartCalls.at(-1).method, "render");
+  }
+  for (const query of analyticalQueries()) {
+    for (const name of ["strategy", "symbol_family", "include_unclassified", "selection_empty"]) {
+      assert.equal(query.has(name), false);
+    }
+  }
+  assert.equal(elements["#filter-strategy"].selectedOptions.some(option => option.value === "unclassified:"), true);
+
+  // A publication race at any resource clears the whole sample and pins its reload.
+  for (const resource of ["positions", "metrics", "series"]) {
+    revisionConflictEndpoint = resource;
+    const beforeConflict = chartCalls.length;
+    const beforeRequests = revisionRequests.length;
+    elements["#filter-direction"].value = resource === "metrics" ? "sell" : "buy";
+    elements["#filter-direction"].listeners.change();
+    await flush(); await flush(); await flush();
+    const reset = chartCalls.findLastIndex(call => call.message === "Amostra atualizada; recarregando...");
+    assert.ok(reset >= beforeConflict, `missing sample invalidation for ${resource}`);
+    assert.equal(chartCalls.at(-1).method, "render");
+    assert.equal(chartCalls.at(-1).data.projection_revision, publishedRevision);
+    assert.ok(chartCalls.slice(reset).filter(call => call.method === "render")
+      .every(call => call.data.projection_revision === publishedRevision));
+    for (const query of analyticalQueries()) {
+      assert.deepEqual(query.getAll("projection_revision"), [publishedRevision]);
+    }
+    assert.ok(revisionRequests.slice(beforeRequests).every(url =>
+      new URLSearchParams(url.split("?")[1]).getAll("projection_revision").length === 1));
+  }
+
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
         node_executable = NODE_EXECUTABLE

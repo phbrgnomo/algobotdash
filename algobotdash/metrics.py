@@ -11,6 +11,8 @@ from fractions import Fraction
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
+from .numeric import monetary_sum
+
 
 class DrawdownEpisode(TypedDict):
     """Public episode shared by depth and duration selectors."""
@@ -231,6 +233,47 @@ def calculate_percentage_drawdown(
         return _empty_drawdown("unavailable"), "numeric_overflow"
     return _select_drawdown(episodes), None
 
+
+def calculate_drawdown_series(
+    events: Sequence[tuple[datetime, float | Fraction]],
+    opening_balances: Mapping[date, float | None],
+    *,
+    period: tuple[date, date] | None,
+    analysis_timezone: ZoneInfo,
+    realized_available: bool = True,
+) -> dict[str, object]:
+    """Publish plot depths from the same exact generators used by the risk cards."""
+    monetary = calculate_monetary_drawdown(
+        events, period=period, analysis_timezone=analysis_timezone,
+        realized_available=realized_available,
+    )
+    percentage, reason = calculate_percentage_drawdown(
+        events, opening_balances, period=period, analysis_timezone=analysis_timezone,
+        realized_available=realized_available,
+    )
+    result: dict[str, object] = {}
+    for name, summary in (("monetary", monetary), ("percentage", percentage)):
+        points: list[dict[str, object]] = []
+        unavailable_reason = reason if name == "percentage" else (
+            "realized_metrics_unavailable_for_open_status" if not realized_available
+            else "numeric_overflow" if summary["state"] == "unavailable" else None
+        )
+        if period is not None and summary["state"] in {"available", "no_drawdown"}:
+            start = datetime.combine(period[0], time.min, analysis_timezone)
+            depths = (_monetary_depths(events, period[0], analysis_timezone)
+                      if name == "monetary" else _percentage_depths(
+                          _daily_closed_events(events, period, analysis_timezone),
+                          opening_balances, period[0], analysis_timezone,
+                      ))
+            points = [{"at": _utc_iso(start), "depth": 0.0}] + [
+                {"at": _utc_iso(at), "depth": float(min(depth, Fraction(0)))}
+                for at, _, depth in depths
+            ]
+        result[name] = {
+            "state": summary["state"], "reason": unavailable_reason, "points": points,
+        }
+    return result
+
 METRIC_NAMES = (
     "net_pnl",
     "gross_profit",
@@ -304,8 +347,8 @@ def _quality_ratios(
     wins: Sequence[float], losses: Sequence[float]
 ) -> tuple[float, float, float | None, float | None, dict[str, str]]:
     """Calculate gross outcomes, profit factor, and payoff."""
-    gross_profit = math.fsum(wins)
-    gross_loss = math.fsum(losses)
+    gross_profit = monetary_sum(wins)
+    gross_loss = monetary_sum(losses)
     unavailable: dict[str, str] = {}
     if not losses:
         unavailable["profit_factor"] = "no_losing_positions"
@@ -386,7 +429,7 @@ def calculate_position_metrics(
         return _unavailable_payload(
             len(pnl_values), excluded_open_positions, "numeric_overflow"
         )
-    net_pnl = math.fsum(pnl_values)
+    net_pnl = monetary_sum(pnl_values)
     wins = [value for value in pnl_values if value > 0]
     losses = [value for value in pnl_values if value < 0]
     gross_profit, gross_loss, profit_factor, payoff, quality_reasons = (
