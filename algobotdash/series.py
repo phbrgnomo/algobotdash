@@ -11,7 +11,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .metrics import calculate_drawdown_series, effective_metric_period
-from .storage import MetricSample, PositionFilters
+from .storage import MetricSample, PositionFilters, SampleTooLargeError
+
+MAX_SERIES_ROWS = 50_000
+MAX_SERIES_POINTS = 50_000
 
 
 def _calendar_bounds(day: date, granularity: str) -> tuple[date, date]:
@@ -43,6 +46,8 @@ def calculate_chart_series(
     granularity: str,
 ) -> dict[str, Any]:
     """Aggregate closed positions, never paginated rows or account adjustments."""
+    if len(sample.series_positions) > MAX_SERIES_ROWS:
+        raise SampleTooLargeError("series_sample_limit")
     period = effective_metric_period(
         sample.daily_pnl, date_from=filters.date_from, date_to=filters.date_to,
         global_first_closed_date=sample.global_first_closed_date,
@@ -77,6 +82,8 @@ def calculate_chart_series(
         bounds[start] = (max(start, period[0]), min(end, period[1]))
         outcomes = grouped.setdefault((position.symbol_family, position.strategy), {})
         outcomes[start] = outcomes.get(start, Fraction(0)) + position.pnl
+        if len(grouped) * len(bounds) > MAX_SERIES_POINTS:
+            raise SampleTooLargeError("series_point_limit")
     bucket_starts = sorted(bounds)
     totals = dict.fromkeys(bucket_starts, Fraction(0))
     strategies = []

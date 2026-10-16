@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
+import time
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -14,6 +16,7 @@ from typing import Any, TypeAlias
 from zoneinfo import ZoneInfo
 
 from .parser import OrderRecord, PositionRecord, RejectedRecord, TransactionRecord
+from .numeric import monetary_sum
 
 ImportHistoryRow: TypeAlias = tuple[int, str, str, str, int, int, int, int]
 ProjectionRow: TypeAlias = dict[str, Any]
@@ -22,7 +25,7 @@ POSITION_SORT_COLUMNS = {
     "opened_at": "utc_timestamp(entry_at)",
     "closed_at": "utc_timestamp(exit_at)",
     "realized_pnl": "CASE WHEN status = 'open' THEN NULL ELSE pnl END",
-    "symbol_family": "symbol_family",
+    "symbol_family": "COALESCE(symbol_family, symbol_raw)",
     "status": "status",
 }
 SORT_ORDERS = {"asc": "ASC", "desc": "DESC"}
@@ -57,6 +60,14 @@ class ProjectionUnavailableError(RuntimeError):
     """Raised when the derived SQLite projection cannot be queried safely."""
 
 
+class ProjectionChangedError(ProjectionUnavailableError):
+    """The requested immutable analytical revision is no longer published."""
+
+
+class SampleTooLargeError(RuntimeError):
+    """A series request exceeds its bounded read or calculation budget."""
+
+
 @dataclass(frozen=True)
 class PositionFilters:  # pylint: disable=too-many-instance-attributes
     """Validated filters shared by position rows and their total count."""
@@ -70,6 +81,7 @@ class PositionFilters:  # pylint: disable=too-many-instance-attributes
     date_to: date | None = None
     include_unclassified: bool = False
     selection_empty: bool = False
+    projection_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -401,7 +413,7 @@ def read_positions(
     active_filters = filters or PositionFilters()
     where_sql, parameters = _position_where(active_filters)
     query = (  # Fixed predicates and allowlisted ordering; values stay parameterized.
-        "SELECT position_id, strategy, symbol_family, " # nosec B608
+        "SELECT position_id, strategy, COALESCE(symbol_family, symbol_raw) AS symbol_family, "
         "CASE WHEN is_associated = 1 AND strategy IS NOT NULL AND symbol_family IS NOT NULL "
         "THEN symbol_family || ' ' || strategy END AS strategy_key, "
         "CASE WHEN is_associated = 1 THEN 'associated' ELSE 'unassociated' "
@@ -414,6 +426,7 @@ def read_positions(
     )
     connection = _open_projection(path, analysis_timezone)
     try:
+        _require_revision(connection, active_filters.projection_revision)
         rows, total = _page_rows(
             connection,
             query,
@@ -428,6 +441,16 @@ def read_positions(
 # pylint: enable=too-many-arguments,too-many-locals
 
 
+def _require_revision(connection: sqlite3.Connection, expected: str | None) -> None:
+    """Pin each read to the revision chosen for the whole dashboard sample."""
+    if expected is not None:
+        actual = connection.execute(
+            "SELECT revision FROM projection_metadata WHERE id = 1"
+        ).fetchone()[0]
+        if actual != expected:
+            raise ProjectionChangedError("a revisão da projeção mudou")
+
+
 def _position_where(filters: PositionFilters) -> tuple[str, tuple[object, ...]]:
     """Build one parameterized predicate for position rows and count queries."""
     clauses: list[str] = []
@@ -438,18 +461,18 @@ def _position_where(filters: PositionFilters) -> tuple[str, tuple[object, ...]]:
         strategy_clauses: list[str] = []
         if filters.strategy is not None:
             values = (filters.strategy,) if isinstance(filters.strategy, str) else filters.strategy
-            placeholders = ",".join("?" for _ in values)
-            strategy_clauses.append(f"(strategy IN ({placeholders}) AND is_associated = 1)")
-            parameters.extend(values)
+            strategy_clauses.append(
+                "(strategy IN (SELECT value FROM json_each(?)) AND is_associated = 1)"
+            )
+            parameters.append(json.dumps(values))
         if filters.include_unclassified:
             strategy_clauses.append("(strategy IS NULL OR is_associated = 0)")
         clauses.append("(" + " OR ".join(strategy_clauses) + ")")
     if filters.symbol_family is not None:
         values = ((filters.symbol_family,) if isinstance(filters.symbol_family, str)
                   else filters.symbol_family)
-        placeholders = ",".join("?" for _ in values)
-        clauses.append(f"COALESCE(symbol_family, symbol_raw) IN ({placeholders})")
-        parameters.extend(values)
+        clauses.append("COALESCE(symbol_family, symbol_raw) IN (SELECT value FROM json_each(?))")
+        parameters.append(json.dumps(values))
     if filters.direction is not None:
         clauses.append("direction = ?")
         parameters.append(filters.direction)
@@ -553,12 +576,17 @@ def _opening_balances(
 # Reading the related inputs in one connection preserves a consistent snapshot.
 # pylint: disable=too-many-locals
 def read_metric_sample(
-    path: Path, filters: PositionFilters, analysis_timezone: ZoneInfo
+    path: Path, filters: PositionFilters, analysis_timezone: ZoneInfo,
+    *, max_rows: int | None = None,
 ) -> MetricSample:
     """Return filtered outcomes and global ledger inputs in one snapshot."""
     where_sql, parameters = _position_where(filters)
     connection = _open_projection(path, analysis_timezone)
+    deadline = time.monotonic() + 5 if max_rows is not None else None
     try:
+        _require_revision(connection, filters.projection_revision)
+        if deadline is not None:
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
         try:
             # The SQL fragment contains only fixed predicates from _position_where;
             # every filter value remains bound through ``parameters``.
@@ -567,7 +595,11 @@ def read_metric_sample(
                 "COALESCE(symbol_family, symbol_raw) AS symbol_family FROM positions "
                 f"{where_sql}"  # nosec B608  # nosemgrep
             )
+            if max_rows is not None:
+                query += f" LIMIT {max_rows + 1:d}"
             rows = connection.execute(query, parameters).fetchall()
+            if max_rows is not None and len(rows) > max_rows:
+                raise SampleTooLargeError("series_sample_limit")
             pnl_values: list[float] = []
             pnl_by_day: dict[date, list[float]] = {}
             pnl_by_instant: dict[datetime, list[float]] = {}
@@ -594,18 +626,24 @@ def read_metric_sample(
                 f"{open_where_sql}",  # nosec B608  # nosemgrep
                 open_parameters,
             ).fetchone()[0]
-            global_closed_days = [
-                date.fromisoformat(_analytical_date(row[0], analysis_timezone) or "")
-                for row in connection.execute(
-                    "SELECT exit_at FROM positions WHERE status = 'closed'"
-                )
-            ]
-            transaction_rows = connection.execute(
+            global_limits = connection.execute(
+                "SELECT MIN(analytical_date(exit_at)), MAX(analytical_date(exit_at)) "
+                "FROM positions WHERE status = 'closed'"
+            ).fetchone()
+            ledger_query = (
                 "SELECT transaction_id, at, commission, tax, swap, pnl, balance, comment "
                 "FROM transactions"
-            ).fetchall()
+            )
+            ledger_parameters: tuple[object, ...] = ()
+            if max_rows is not None:
+                ledger_query += " WHERE analytical_date(at) IN (SELECT value FROM json_each(?))"
+                ledger_parameters = (json.dumps([day.isoformat() for day in pnl_by_day]),)
+                ledger_query += f" LIMIT {max_rows + 1:d}"
+            transaction_rows = connection.execute(ledger_query, ledger_parameters).fetchall()
+            if max_rows is not None and len(transaction_rows) > max_rows:
+                raise SampleTooLargeError("series_ledger_limit")
             daily_pnl = {
-                day: math.fsum(values) for day, values in pnl_by_day.items()
+                day: monetary_sum(values) for day, values in pnl_by_day.items()
             }
             if not all(math.isfinite(value) for value in daily_pnl.values()):
                 raise ValueError("P&L diário não finito")
@@ -618,14 +656,16 @@ def read_metric_sample(
                 "SELECT revision FROM projection_metadata WHERE id = 1"
             ).fetchone()[0]
         except (sqlite3.Error, TypeError, ValueError, OverflowError) as exc:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise SampleTooLargeError("series_query_timeout") from exc
             raise ProjectionUnavailableError("projeção SQLite indisponível") from exc
         return MetricSample(
             tuple(pnl_values),
             excluded_open_positions,
             daily_pnl,
             opening_balances,
-            min(global_closed_days, default=None),
-            max(global_closed_days, default=None),
+            date.fromisoformat(global_limits[0]) if global_limits[0] else None,
+            date.fromisoformat(global_limits[1]) if global_limits[1] else None,
             closed_events,
             tuple(series_positions),
             revision,

@@ -227,6 +227,8 @@ const pendingPositions = [];
 const pendingMetrics = [];
 const pendingFilters = [];
 const pendingSeries = [];
+const pendingSeriesBodies = [];
+const seriesSignals = [];
 const seriesRequests = [];
 const chartCalls = [];
 let seriesMode = "normal";
@@ -278,7 +280,7 @@ const context = {
     render(data) { chartCalls.push({method: "render", data}); },
   },
   document: {querySelector: (selector) => elements[selector], createElement: () => new Element()},
-  fetch: async (url) => {
+  fetch: async (url, options = {}) => {
     if (url === "/api/status") return {ok: true, status: 200, json: async () => statusPayload()};
     if (url === "/api/filter-options") {
       if (filterMode === "pending") return new Promise((resolve) => pendingFilters.push(resolve));
@@ -286,8 +288,13 @@ const context = {
     }
     if (url.startsWith("/api/series?")) {
       seriesRequests.push(url);
+      seriesSignals.push(options.signal);
       if (seriesMode === "pending") return new Promise(resolve => pendingSeries.push(resolve));
+      if (seriesMode === "body_pending") return {ok: true,
+        json: () => new Promise(resolve => pendingSeriesBodies.push(resolve))};
       if (seriesMode === "error") return {ok: false, status: 503};
+      if (seriesMode === "validation") return {ok: false, status: 422,
+        json: async () => ({detail: {code: "contradictory_filters"}})};
       return {ok: true, json: async () => seriesMode === "empty" ? emptySeries : seriesPayload};
     }
     if (url.startsWith("/api/metrics?")) {
@@ -301,7 +308,7 @@ const context = {
     return {ok: true, status: 200, json: async () => ({items: [], total: 0})};
   },
   setInterval: (callback) => { interval = callback; return 1; },
-  URLSearchParams, Intl, Date, console,
+  URLSearchParams, Intl, Date, console, AbortController, setTimeout, clearTimeout,
 };
 vm.runInNewContext(source + "\nglobalThis.loadPositions = loadPositions; globalThis.loadMetrics = loadMetrics; globalThis.loadFilterOptions = loadFilterOptions; globalThis.loadSeries = loadSeries;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -318,7 +325,7 @@ const watchdog = setTimeout(() => {
   ]);
   assert.equal(seriesRequests.length, 1);
   assert.deepEqual([...new URLSearchParams(seriesRequests[0].split("?")[1])],
-    [["status", "closed"], ["granularity", "day"]]);
+    [["projection_revision", "revision"], ["status", "closed"], ["granularity", "day"]]);
 
   if (elements["#risk-deepest"].textContent !== "-10,00") throw new Error("missing monetary depth");
   if (elements["#risk-longest"].textContent !== "1 dia") throw new Error("singular duration mismatch");
@@ -389,6 +396,50 @@ const watchdog = setTimeout(() => {
   assert.equal(chartCalls.at(-1).data, newSeriesPayload);
   pendingSeries.length = 0;
   seriesMode = "normal";
+
+  seriesMode = "validation";
+  const beforeValidation = chartCalls.length;
+  assert.equal(await context.loadSeries(), "handled");
+  assert.deepEqual(chartCalls.slice(beforeValidation), [
+    {method: "clear", message: "Consultando gráficos..."},
+    {method: "clear", message: "Gráficos indisponíveis (Uma estratégia não pode ser combinada com posições não associadas.)."},
+  ]);
+
+  // Bound both a stalled response and a stalled JSON body without waiting 15 seconds.
+  for (const mode of ["pending", "body_pending"]) {
+    seriesMode = mode;
+    let expire;
+    const normalSetTimeout = context.setTimeout;
+    const normalClearTimeout = context.clearTimeout;
+    context.setTimeout = (callback, delay) => {
+      assert.equal(delay, 15000);
+      expire = callback;
+      return 0;
+    };
+    let timerCleared = false;
+    context.clearTimeout = () => { timerCleared = true; };
+    const beforeTimeout = chartCalls.length;
+    const stalled = context.loadSeries();
+    await flush();
+    expire();
+    assert.equal(await stalled, false);
+    assert.equal(seriesSignals.at(-1).aborted, true);
+    assert.equal(timerCleared, true);
+    assert.equal(chartCalls.length, beforeTimeout + 2);
+    assert.match(chartCalls.at(-1).message, /Tempo limite excedido/);
+    const afterTimeout = chartCalls.length;
+    if (mode === "pending") pendingSeries.shift()({ok: true, json: async () => seriesPayload});
+    else pendingSeriesBodies.shift()(seriesPayload);
+    await flush();
+    assert.equal(chartCalls.length, afterTimeout);
+    context.setTimeout = normalSetTimeout;
+    context.clearTimeout = normalClearTimeout;
+    seriesMode = "normal";
+    const beforeRetry = seriesRequests.length;
+    await interval();
+    assert.equal(seriesRequests.length, beforeRetry + 1);
+    assert.equal(chartCalls.at(-1).data, seriesPayload);
+  }
 
   metricMode = "pending";
   elements["#filter-strategy"].value = "strategy:Turtle";
@@ -536,6 +587,10 @@ elements["#filter-status"].value = "closed";
 elements["#filter-association"].value = "all";
 elements["#chart-granularity"].value = "day";
 let state = "ready";
+let publishedRevision = "revision";
+let revisionConflictEndpoint = null;
+let revisionChanges = 0;
+const revisionRequests = [];
 let interval;
 let positionFetches = 0;
 let filterFetches = 0;
@@ -579,7 +634,7 @@ const openMetricPayload = {sample_size: 0, excluded_open_positions: 3, net_pnl: 
   unavailable_reasons: {net_pnl: "realized_metrics_unavailable_for_open_status"}};
 const payload = () => ({state, configuration: "valid", source: "available",
   projection: state === "unavailable" ? "invalid" : "available", source_name: "Report.xlsx",
-  timezone: "America/Bahia", projection_revision: state === "ready" ? "revision" : null,
+  timezone: "America/Bahia", projection_revision: state === "ready" ? publishedRevision : null,
   last_import: state === "ready" ? {source_hash: "same-hash", imported_at: "2026-08-01T00:00:00+00:00"} : null});
 const context = {
   ChartView: {
@@ -597,11 +652,21 @@ const context = {
       if (filterMode === "failure") return {ok: false, json: async () => ({})};
       return {ok: true, json: async () => filterPayload};
     }
+    if (["positions", "metrics", "series"].some(name => url.startsWith(`/api/${name}?`))) {
+      revisionRequests.push(url);
+      if (revisionConflictEndpoint && url.startsWith(`/api/${revisionConflictEndpoint}?`)) {
+        revisionConflictEndpoint = null;
+        publishedRevision = `coherent-${++revisionChanges}`;
+        return {ok: false, status: 409,
+          json: async () => ({detail: {code: "projection_revision_changed"}})};
+      }
+    }
     if (url.startsWith("/api/series?")) {
       seriesFetches += 1;
       lastSeriesUrl = url;
       const query = new URLSearchParams(url.split("?")[1]);
-      lastSeriesPayload = {...seriesPayload, granularity: query.get("granularity")};
+      lastSeriesPayload = {...seriesPayload, granularity: query.get("granularity"),
+        projection_revision: query.get("projection_revision")};
       const data = lastSeriesPayload;
       return {ok: true, json: async () => data};
     }
@@ -618,7 +683,7 @@ const context = {
     return {ok: true, json: async () => ({items: [], total: 120})};
   },
   setInterval: (callback) => { interval = callback; return 1; },
-  URLSearchParams, Intl, Date, console,
+  URLSearchParams, Intl, Date, console, AbortController, setTimeout, clearTimeout,
 };
 vm.runInNewContext(source + "\nglobalThis.loadStatus = loadStatus; globalThis.formatMetric = formatMetric; globalThis.renderMetrics = renderMetrics; globalThis.loadFilterOptions = loadFilterOptions; globalThis.buildFilterQuery = buildFilterQuery;", context);
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -886,6 +951,28 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     }
   }
   assert.equal(elements["#filter-strategy"].selectedOptions.some(option => option.value === "unclassified:"), true);
+
+  // A publication race at any resource clears the whole sample and pins its reload.
+  for (const resource of ["positions", "metrics", "series"]) {
+    revisionConflictEndpoint = resource;
+    const beforeConflict = chartCalls.length;
+    const beforeRequests = revisionRequests.length;
+    elements["#filter-direction"].value = resource === "metrics" ? "sell" : "buy";
+    elements["#filter-direction"].listeners.change();
+    await flush(); await flush(); await flush();
+    const reset = chartCalls.findLastIndex(call => call.message === "Amostra atualizada; recarregando...");
+    assert.ok(reset >= beforeConflict, `missing sample invalidation for ${resource}`);
+    assert.equal(chartCalls.at(-1).method, "render");
+    assert.equal(chartCalls.at(-1).data.projection_revision, publishedRevision);
+    assert.ok(chartCalls.slice(reset).filter(call => call.method === "render")
+      .every(call => call.data.projection_revision === publishedRevision));
+    for (const query of analyticalQueries()) {
+      assert.deepEqual(query.getAll("projection_revision"), [publishedRevision]);
+    }
+    assert.ok(revisionRequests.slice(beforeRequests).every(url =>
+      new URLSearchParams(url.split("?")[1]).getAll("projection_revision").length === 1));
+  }
+
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
         node_executable = NODE_EXECUTABLE

@@ -202,6 +202,9 @@
       let filterRequestGeneration = 0;
       let refreshPollTimer = null;
       let seriesRequestGeneration = 0;
+      let seriesController = null;
+      let activeProjectionRevision = null;
+      let projectionReloadScheduled = false;
       const selectionModes = new Map([[filterStrategy, "all"], [filterSymbolFamily, "all"]]);
 
       function selectedValues(select) {
@@ -484,6 +487,7 @@
 
       function buildFilterQuery() {
         const query = new URLSearchParams();
+        if (activeProjectionRevision) query.set("projection_revision", activeProjectionRevision);
         [[filterStrategy, "strategy"], [filterSymbolFamily, "symbol_family"]].forEach(([select, name]) => {
           const values = selectedValues(select);
           if (selectionModes.get(select) === "all" && values.length === select.options.length) return;
@@ -506,23 +510,71 @@
         ChartView.clear(message);
       }
 
+      function projectionChanged() {
+        positionRequestGeneration += 1;
+        metricRequestGeneration += 1;
+        seriesRequestGeneration += 1;
+        seriesController?.abort();
+        latestImportKey = null;
+        latestFilterImportKey = null;
+        document.querySelector("#positions-body").replaceChildren();
+        document.querySelector("#page-summary").textContent = "Amostra atualizada; recarregando...";
+        document.querySelector("#previous-page").disabled = true;
+        document.querySelector("#next-page").disabled = true;
+        clearMetrics("Amostra atualizada; recarregando...");
+        clearCharts("Amostra atualizada; recarregando...");
+        if (!projectionReloadScheduled) {
+          projectionReloadScheduled = true;
+          Promise.resolve().then(async () => {
+            await loadStatus();
+            projectionReloadScheduled = false;
+          });
+        }
+      }
+
       async function loadSeries(filterQuery = buildFilterQuery()) {
         const generation = ++seriesRequestGeneration;
+        seriesController?.abort();
+        const controller = new AbortController();
+        seriesController = controller;
         clearCharts("Consultando gráficos...");
         const query = new URLSearchParams(filterQuery);
         query.set("granularity", document.querySelector("#chart-granularity").value);
+        let timer;
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error("Tempo limite excedido. A consulta será tentada novamente."));
+            controller.abort();
+          }, 15000);
+        });
         try {
-          const response = await fetch(`/api/series?${query}`, {cache: "no-store"});
-          if (!response.ok) throw filterError(response);
-          const data = await response.json();
+          const response = await Promise.race([
+            fetch(`/api/series?${query}`, {cache: "no-store", signal: controller.signal}), timeout,
+          ]);
+          if (!response.ok) {
+            let code = null;
+            try {
+              const payload = await Promise.race([response.json(), timeout]);
+              code = payload.detail?.code || null;
+            } catch (_error) {
+              if (controller.signal.aborted) throw _error;
+              // Fall back to the status if an error response has no JSON body.
+            }
+            throw filterError(response, code);
+          }
+          const data = await Promise.race([response.json(), timeout]);
           if (generation !== seriesRequestGeneration) return false;
           ChartView.render(data);
           return true;
         } catch (error) {
           if (generation !== seriesRequestGeneration) return false;
+          if (error.code === "projection_revision_changed") { projectionChanged(); return false; }
           clearCharts(`Gráficos indisponíveis (${error.message}).`);
           if (error.retryable !== false) { latestImportKey = null; return false; }
           return "handled";
+        } finally {
+          clearTimeout(timer);
+          if (seriesController === controller) seriesController = null;
         }
       }
 
@@ -530,9 +582,12 @@
         const messages = {
           invalid_date_range: "A data inicial deve ser anterior ou igual à data final.",
           contradictory_filters: "Uma estratégia não pode ser combinada com posições não associadas.",
+          series_too_large: "A amostra excede o limite dos gráficos. Reduza o período ou selecione menos estratégias.",
+          series_rate_limit: "Muitas consultas de gráficos. Aguarde para tentar novamente.",
         };
         const error = new Error(messages[code] || `HTTP ${response.status}`);
-        error.retryable = response.status === undefined || response.status >= 500;
+        error.code = code;
+        error.retryable = response.status === undefined || response.status >= 500 || response.status === 429;
         return error;
       }
 
@@ -573,6 +628,7 @@
           return true;
         } catch (error) {
           if (requestGeneration !== positionRequestGeneration) return false;
+          if (error.code === "projection_revision_changed") { projectionChanged(); return false; }
           document.querySelector("#positions-body").replaceChildren();
           document.querySelector("#page-summary").textContent = "Posições indisponíveis.";
           setNotice("#table-state", `Atenção: não foi possível consultar posições (${error.message}).`, true);
@@ -612,6 +668,7 @@
           return true;
         } catch (error) {
           if (requestGeneration !== metricRequestGeneration) return false;
+          if (error.code === "projection_revision_changed") { projectionChanged(); return false; }
           clearMetrics(`Métricas indisponíveis (${error.message}).`);
           if (error.retryable !== false) {
             latestImportKey = null;
@@ -626,6 +683,7 @@
           positionRequestGeneration += 1;
           metricRequestGeneration += 1;
           seriesRequestGeneration += 1;
+          seriesController?.abort();
           const message = "Atenção: a data inicial deve ser anterior ou igual à data final.";
           document.querySelector("#positions-body").replaceChildren();
           document.querySelector("#page-summary").textContent = "Intervalo de datas inválido.";
@@ -641,6 +699,7 @@
           positionRequestGeneration += 1;
           metricRequestGeneration += 1;
           seriesRequestGeneration += 1;
+          seriesController?.abort();
           renderPositions({items: [], total: 0});
           clearMetrics("Nenhuma combinação selecionada.");
           clearCharts("Nenhuma combinação selecionada.");
@@ -709,6 +768,7 @@
           renderStatus(data);
           setNotice("#error", "", false);
           const importKey = data.projection_revision || null;
+          activeProjectionRevision = importKey;
           if (data.state === "ready") {
             if (importKey !== latestFilterImportKey) {
               const filtersLoaded = await loadFilterOptions();
@@ -727,6 +787,7 @@
           }
           if (data.state === "empty") {
             seriesRequestGeneration += 1;
+            seriesController?.abort();
             clearCharts("Nenhuma importação válida.");
             positionRequestGeneration += 1;
             metricRequestGeneration += 1;
@@ -738,6 +799,7 @@
           }
           if (data.state === "unavailable") {
             seriesRequestGeneration += 1;
+            seriesController?.abort();
             clearCharts("Projeção indisponível.");
             positionRequestGeneration += 1;
             metricRequestGeneration += 1;

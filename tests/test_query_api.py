@@ -291,8 +291,8 @@ class QueryApiTests(unittest.TestCase):
         self.assertEqual(closed["monetary_drawdown"], all_positions["monetary_drawdown"])
         self.assertEqual(all_positions["excluded_open_positions"], 1)
 
-    def test_monetary_drawdown_numeric_overflow_is_isolated(self) -> None:
-        """Exact decimal depth can overflow while binary position totals stay finite."""
+    def test_exact_decimal_overflow_rejects_metrics_consistently(self) -> None:
+        """Metrics and series reject decimal sums beyond finite JSON representation."""
         with self._projection() as connection:
             connection.execute(
                 "INSERT INTO imports VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -312,17 +312,14 @@ class QueryApiTests(unittest.TestCase):
 
         response = self._request("/api/metrics")
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["net_pnl"], -sys.float_info.max)
-        self.assertEqual(payload["monetary_drawdown"], {
-            "state": "unavailable", "deepest_episode": None, "longest_episode": None,
-        })
-        self.assertEqual(payload["unavailable_reasons"]["monetary_drawdown"],
-                         "numeric_overflow")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["code"], "projection_unavailable")
+        series = self._request("/api/series").json()
+        self.assertEqual(series["state"], "unavailable")
+        self.assertEqual(series["reason"], "numeric_overflow")
+        self.assertEqual(series["periods"], [])
 
-        # The same decimal overflow must stay isolated when both positions close
-        # in one instant and storage creates a single exact Fraction aggregate.
+        # The shared representation also rejects the same overflow at one instant.
         connection = sqlite3.connect(self.database_path)
         try:
             connection.execute("UPDATE positions SET exit_at = '2026-08-02T12:00:00+00:00'")
@@ -330,10 +327,8 @@ class QueryApiTests(unittest.TestCase):
         finally:
             connection.close()
         simultaneous = self._request("/api/metrics")
-        self.assertEqual(simultaneous.status_code, 200)
-        self.assertEqual(simultaneous.json()["monetary_drawdown"], payload["monetary_drawdown"])
-        self.assertEqual(simultaneous.json()["unavailable_reasons"]["monetary_drawdown"],
-                         "numeric_overflow")
+        self.assertEqual(simultaneous.status_code, 503)
+        self.assertEqual(self._request("/api/series").status_code, 503)
 
     def test_monetary_same_instant_decimal_losses_recover_exactly(self):
         """Aggregation preserves exact decimal recovery across later timestamps."""

@@ -11,6 +11,8 @@ from fractions import Fraction
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
+from .numeric import monetary_sum
+
 
 class DrawdownEpisode(TypedDict):
     """Public episode shared by depth and duration selectors."""
@@ -345,8 +347,8 @@ def _quality_ratios(
     wins: Sequence[float], losses: Sequence[float]
 ) -> tuple[float, float, float | None, float | None, dict[str, str]]:
     """Calculate gross outcomes, profit factor, and payoff."""
-    gross_profit = math.fsum(wins)
-    gross_loss = math.fsum(losses)
+    gross_profit = monetary_sum(wins)
+    gross_loss = monetary_sum(losses)
     unavailable: dict[str, str] = {}
     if not losses:
         unavailable["profit_factor"] = "no_losing_positions"
@@ -427,7 +429,7 @@ def calculate_position_metrics(
         return _unavailable_payload(
             len(pnl_values), excluded_open_positions, "numeric_overflow"
         )
-    net_pnl = math.fsum(pnl_values)
+    net_pnl = monetary_sum(pnl_values)
     wins = [value for value in pnl_values if value > 0]
     losses = [value for value in pnl_values if value < 0]
     gross_profit, gross_loss, profit_factor, payoff, quality_reasons = (

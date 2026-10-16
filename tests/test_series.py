@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import tempfile
+import threading
 import unittest
 from contextlib import closing, contextmanager
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlencode
 
+import httpx
+
+from algobotdash import storage
+from algobotdash.series_limits import SeriesBudget
 from algobotdash.storage import SCHEMA
 from algobotdash.web import app
 from tests.fixture_helpers import get_asgi, insert_positions, insert_transactions
 
 
-class SeriesTests(unittest.TestCase):
+class SeriesTests(unittest.TestCase):  # pylint: disable=too-many-public-methods
     """Verify plotted performance against independently known position outcomes."""
 
     def setUp(self):
@@ -201,6 +208,9 @@ class SeriesTests(unittest.TestCase):
                 for day, pnl in ((12, .1), (13, .2), (14, -.3))
             ])
         self.assertEqual(self.request()["periods"][-1]["cumulative"], 0)
+        self.assertEqual(self.request("metrics")["net_pnl"], 0)
+        self.assertEqual(self.request("metrics")["expectancy"], 0)
+        self.assertEqual(self.request(query="granularity=month")["periods"][-1]["cumulative"], 0)
         with self.connection() as connection:
             connection.execute("UPDATE positions SET pnl=1e308")
         payload = self.request()
@@ -224,3 +234,110 @@ class SeriesTests(unittest.TestCase):
         payload = self.request(query="symbol_family=WINQ26")
         self.assertEqual(payload["periods"][-1]["cumulative"], 10)
         self.assertEqual(payload["strategies"][0]["symbol_family"], "WINQ26")
+        self.assertEqual(
+            self.request("positions", "symbol_family=WINQ26")["items"][0]["symbol_family"],
+            "WINQ26",
+        )
+
+    def test_large_combined_filters_work_under_sqlite_999_variable_limit(self):
+        """Bind each dimension as one JSON value, preserving full accepted selections."""
+        if not hasattr(sqlite3.Connection, "setlimit"):
+            self.skipTest("requires Python 3.11+ for SQLite runtime limits")
+        open_projection = storage._open_projection  # pylint: disable=protected-access
+
+        def limited_connection(*args, **kwargs):
+            connection = open_projection(*args, **kwargs)
+            connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+            return connection
+
+        query = urlencode(
+            [("strategy", value) for value in ["Turtle", "FVG"] +
+             [f"Unused{i}" for i in range(498)]] +
+            [("symbol_family", value) for value in ["WIN", "WDO"] +
+             [f"Unknown{i}" for i in range(498)]]
+        )
+        with patch("algobotdash.storage._open_projection", side_effect=limited_connection):
+            self.assertEqual(self.request("positions", query)["total"], 4)
+            self.assertEqual(self.request("metrics", query)["net_pnl"], 16)
+            self.assertEqual(self.request(query=query)["periods"][-1]["cumulative"], 16)
+
+    def test_readers_reject_a_different_published_revision(self):
+        """Every sample endpoint must honor the same requested immutable revision."""
+        for endpoint in ("positions", "metrics", "series"):
+            self.request(endpoint, "projection_revision=fixture")
+        with self.connection() as connection:
+            connection.execute("UPDATE projection_metadata SET revision='next'")
+        for endpoint in ("positions", "metrics", "series"):
+            response = get_asgi(app, f"/api/{endpoint}?projection_revision=fixture")
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["detail"]["code"], "projection_revision_changed")
+            self.request(endpoint, "projection_revision=next")
+
+    def test_series_limits_reject_rows_ledger_and_dense_points(self):
+        """Reject before materializing a large read or a dense period/strategy matrix."""
+        for setting, limit in (("algobotdash.web.MAX_SERIES_ROWS", 2),
+                               ("algobotdash.series.MAX_SERIES_POINTS", 2)):
+            with patch(setting, limit):
+                response = get_asgi(app, "/api/series")
+            self.assertEqual(response.status_code, 413)
+            self.assertEqual(response.json()["detail"]["code"], "series_too_large")
+        with self.connection() as connection:
+            insert_transactions(connection, [
+                (str(index), None, None, None, "2026-01-12T10:00:00Z", "", "balance",
+                 None, None, 0, 0, 0, 100, 100, "Ajuste de Saldo", 1)
+                for index in range(11)
+            ])
+        with patch("algobotdash.web.MAX_SERIES_ROWS", 10):
+            self.assertEqual(get_asgi(app, "/api/series").status_code, 413)
+
+    def test_series_rate_limit_is_explicit_and_recovers(self):
+        """Rate rejections carry Retry-After and expire without queuing work."""
+        budget = SeriesBudget()
+        with patch("algobotdash.web.series_budget", return_value=budget):
+            for _ in range(30):
+                self.assertEqual(get_asgi(app, "/api/series").status_code, 200)
+            response = get_asgi(app, "/api/series")
+        self.assertEqual(response.status_code, 429)
+        self.assertGreater(int(response.headers["Retry-After"]), 0)
+        self.assertEqual(response.json()["detail"]["code"], "series_rate_limit")
+        with patch("algobotdash.series_limits.time.monotonic", return_value=float("inf")):
+            budget.start()
+        budget.finish()
+
+    def test_busy_series_workers_do_not_block_reads_or_release_on_client_cancellation(self):
+        """Health-like reads stay responsive and cancelling HTTP cannot bypass admission."""
+        release = threading.Event()
+        entered = threading.Barrier(3)
+        budget = SeriesBudget()
+        original_read = storage.read_metric_sample
+
+        def blocked_read(*args, **kwargs):
+            entered.wait(timeout=3)
+            if not release.wait(timeout=3):
+                raise AssertionError("series worker was not released")
+            return original_read(*args, **kwargs)
+
+        async def requests():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                first = asyncio.create_task(client.get("/api/series"))
+                second = asyncio.create_task(client.get("/api/series"))
+                try:
+                    await asyncio.to_thread(entered.wait, 3)
+                    response = await asyncio.wait_for(client.get("/api/strategies"), timeout=1)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual((await client.get("/api/series")).status_code, 429)
+                    first.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await first
+                    self.assertEqual((await client.get("/api/series")).status_code, 429)
+                finally:
+                    release.set()
+                    await asyncio.gather(first, second, return_exceptions=True)
+
+        with patch("algobotdash.web.read_metric_sample", side_effect=blocked_read), \
+             patch("algobotdash.web.series_budget", return_value=budget):
+            asyncio.run(requests())
+        # asyncio.run waits for admitted shielded workers before closing its executor.
+        budget.start()
+        budget.finish()

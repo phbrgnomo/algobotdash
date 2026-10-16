@@ -40,7 +40,29 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || "playwright");
     assert.match(await page.locator("#performance-chart .chart-inspection").innerText(), /WIN Turtle/);
     await page.locator("#performance-chart [tabindex]").focus();
     await page.keyboard.press("Home");
-    await page.locator("#performance-chart [tabindex]").hover();
+    const inspection = page.locator("#performance-chart .chart-inspection");
+    const firstPeriod = await inspection.innerText();
+    assert.match(firstPeriod, /01\/08\/2026/);
+    assert.match(firstPeriod, /Resultado: 100,00 · Acumulado: 100,00/);
+    assert.match(firstPeriod, /WIN Turtle: 0,00 · Acumulado: 0,00/);
+    await page.keyboard.press("End");
+    const lastPeriod = await inspection.innerText();
+    assert.notEqual(lastPeriod, firstPeriod);
+    assert.match(lastPeriod, /03\/08\/2026/);
+    assert.match(lastPeriod, /Resultado: -30,00 · Acumulado: 70,00/);
+    assert.match(lastPeriod, /WIN Turtle: -30,00 · Acumulado: -30,00/);
+    await page.locator("#performance-chart [tabindex]").hover({position: {x: 2, y: 40}});
+    assert.equal(await inspection.innerText(), firstPeriod);
+    // Touch must change a multi-period panel, not merely hit a single-point chart.
+    await page.setViewportSize({width: 390, height: 844});
+    await page.waitForTimeout(150);
+    await page.locator("#performance-chart [tabindex]").focus();
+    await page.keyboard.press("Home");
+    const hit = await page.locator("#performance-chart [tabindex]").boundingBox();
+    await page.touchscreen.tap(hit.x + hit.width - 3, hit.y + hit.height / 2);
+    assert.equal(await inspection.innerText(), lastPeriod);
+    await page.setViewportSize({width: 1280, height: 960});
+    await page.waitForTimeout(150);
     // Category-only selection is a real filtered sample in all three resources.
     await page.locator("#symbols-all").click();
     await page.selectOption("#filter-strategy", ["unclassified:"]);
@@ -89,8 +111,6 @@ const {chromium} = require(process.env.PLAYWRIGHT_MODULE || "playwright");
     await page.setViewportSize({width: 390, height: 844});
     await page.waitForTimeout(150);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-    const svg = await page.locator("#performance-chart svg").boundingBox();
-    await page.touchscreen.tap(svg.x + svg.width / 2, svg.y + svg.height / 2);
     if (process.env.SMOKE_ARTIFACT_DIR) {
       await page.screenshot({path: `${process.env.SMOKE_ARTIFACT_DIR}/charts-mobile.png`, fullPage: true});
     }

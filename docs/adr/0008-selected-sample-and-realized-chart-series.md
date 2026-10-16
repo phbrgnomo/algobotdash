@@ -13,3 +13,7 @@ frequência por encerramento no monetário e diária no percentual. Recalcular
 essas trajetórias no navegador a partir da tabela paginada perderia operações
 e poderia ocultar quedas intradiárias. As convenções da ADR 0003 continuam
 válidas; detalhes do contrato estão na especificação da Issue #7.
+
+As consultas independentes são fixadas à revisão publicada escolhida pelo
+dashboard. Uma revisão diferente invalida a amostra inteira antes da recarga,
+evitando combinar tabela, cartões e gráficos de importações distintas.

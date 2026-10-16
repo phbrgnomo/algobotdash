@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sqlite3
@@ -24,10 +25,13 @@ from .metrics import (
 )
 from .refresh import RefreshInProgressError, RefreshLockUnavailableError
 from .refresh_runner import RefreshRunner
-from .series import calculate_chart_series
+from .series import MAX_SERIES_ROWS, calculate_chart_series
+from .series_limits import SeriesBudget, SeriesBusyError, series_budget
 from .storage import (
     PositionFilters,
     ProjectionUnavailableError,
+    ProjectionChangedError,
+    SampleTooLargeError,
     read_filter_options,
     read_imports,
     read_metric_sample,
@@ -128,8 +132,10 @@ def health() -> dict[str, Any]:
     return _health_state()
 
 
-def _projection_error(_exc: ProjectionUnavailableError) -> HTTPException:
+def _projection_error(exc: ProjectionUnavailableError) -> HTTPException:
     """Translate projection access failures into one stable HTTP response."""
+    if isinstance(exc, ProjectionChangedError):
+        return HTTPException(status_code=409, detail={"code": "projection_revision_changed"})
     return HTTPException(
         status_code=503,
         detail={"code": "projection_unavailable"},
@@ -171,6 +177,7 @@ async def _position_filters(
     date_to: date | None = None,
     include_unclassified: bool = False,
     selection_empty: bool = False,
+    projection_revision: str | None = None,
 ) -> PositionFilters:
     """Normalize and validate filters shared by position-based endpoints."""
     normalized_strategy = _optional_dimension(strategy, "strategy")
@@ -190,6 +197,7 @@ async def _position_filters(
         date_to=date_to,
         include_unclassified=include_unclassified,
         selection_empty=selection_empty,
+        projection_revision=projection_revision,
     )
 # pylint: enable=too-many-arguments,too-many-positional-arguments
 
@@ -358,18 +366,41 @@ async def metrics_endpoint(
 # pylint: enable=too-many-arguments,too-many-positional-arguments,too-many-locals
 
 
-@app.get("/api/series")
+def _series_response(
+    filters: PositionFilters, granularity: str, budget: SeriesBudget
+) -> JSONResponse:
+    """Read, calculate and serialize off the event loop, retaining the work permit."""
+    try:
+        config = _runtime_config()
+        sample = read_metric_sample(
+            DATABASE_PATH, filters, config.timezone, max_rows=MAX_SERIES_ROWS
+        )
+        return JSONResponse(calculate_chart_series(sample, filters, config.timezone, granularity))
+    except SampleTooLargeError as exc:
+        raise HTTPException(status_code=413, detail={"code": "series_too_large"}) from exc
+    except ProjectionUnavailableError as exc:
+        raise _projection_error(exc) from exc
+    finally:
+        budget.finish()
+
+
+@app.get("/api/series", response_model=None)
 async def series_endpoint(
     filters: Annotated[PositionFilters, Depends(_position_filters)],
     granularity: Literal["day", "week", "month", "year"] = "day",
-) -> dict[str, Any]:
+) -> JSONResponse:
     """Return unpaginated realized series using the shared analytical sample."""
-    config = _runtime_config()
+    budget = series_budget(str(DATABASE_PATH.resolve()))
     try:
-        sample = read_metric_sample(DATABASE_PATH, filters, config.timezone)
-        return calculate_chart_series(sample, filters, config.timezone, granularity)
-    except ProjectionUnavailableError as exc:
-        raise _projection_error(exc) from exc
+        budget.start()
+    except SeriesBusyError as exc:
+        raise HTTPException(
+            status_code=429, detail={"code": "series_rate_limit"},
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
+    # Shield keeps the admitted worker alive until its finally block releases
+    # concurrency, even when the browser aborts the HTTP request.
+    return await asyncio.shield(asyncio.to_thread(_series_response, filters, granularity, budget))
 
 
 @app.get("/static/charts.js", include_in_schema=False)

@@ -78,6 +78,28 @@ Status: decisões fechadas via `grill-with-docs`; implementação local autoriza
   ajusta à largura e descarta respostas de séries de gerações anteriores.
 - A ordenação e a paginação afetam somente a tabela. A agregação de período
   afeta somente o gráfico de performance, preservando os drawdowns originais.
+- As três consultas compartilham `projection_revision`, obtida do estado do
+  serviço. Cada leitor verifica a revisão na própria conexão SQLite; uma
+  publicação concorrente produz HTTP 409 `projection_revision_changed`. O
+  dashboard invalida toda a amostra e consulta novamente o estado antes de
+  carregar a nova revisão, inclusive para paginação e mudança de agregação.
+- Cada dimensão é ligada ao SQL como um único array JSON via `json_each`,
+  preservando as 500 opções por dimensão sem exceder 999 variáveis combinadas.
+  O runtime SQLite deve oferecer JSON1, como nas imagens Python adotadas.
+- Somatórios monetários dos cartões, séries e P&L diário usam a representação
+  decimal exata dos valores projetados, com uma conversão final para número
+  JSON. Não há arredondamento intermediário; `0.1 + 0.2 - 0.3` resulta em zero.
+- A leitura, agregação e serialização das séries executam fora do loop HTTP.
+  Por projeção e processo, há no máximo duas consultas em execução e 30 inícios
+  por minuto. Rejeições imediatas usam HTTP 429 `series_rate_limit` e
+  `Retry-After`; uma desconexão não libera o limite antes de o worker terminar.
+- Séries aceitam até 50.000 posições lidas, 50.000 transações dos dias relevantes
+  e 50.000 pontos na matriz estratégia/período. Consultas SQLite têm orçamento
+  de cinco segundos. Excesso retorna HTTP 413 `series_too_large`; o operador
+  deve reduzir o intervalo ou a seleção. Nenhuma série parcial é publicada.
+- O navegador cancela a consulta de séries substituída e limita a consulta e a
+  leitura do corpo a 15 segundos. Timeout limpa o gráfico e permite nova
+  tentativa pelo ciclo de estado existente; erros 422 preservam sua explicação.
 
 ## Verificação
 
