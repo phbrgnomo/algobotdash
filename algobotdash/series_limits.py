@@ -11,6 +11,7 @@ class SeriesBusyError(RuntimeError):
     """Reject work before opening SQLite or allocating a chart sample."""
 
     def __init__(self, retry_after: int):
+        """Record the retry delay for a rejected series request."""
         super().__init__("series_rate_limit")
         self.retry_after = retry_after
 
@@ -19,6 +20,7 @@ class SeriesBudget:
     """Allow two concurrent requests and thirty starts per minute per projection."""
 
     def __init__(self):
+        """Initialize the admission lock, request history and active-worker count."""
         self._lock = threading.Lock()
         self._starts: deque[float] = deque()
         self._active = 0

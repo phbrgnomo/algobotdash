@@ -25,6 +25,7 @@ class SeriesTests(unittest.TestCase):  # pylint: disable=too-many-public-methods
     """Verify plotted performance against independently known position outcomes."""
 
     def setUp(self):
+        """Build an isolated projection with classified, residual and open positions."""
         self.directory = tempfile.TemporaryDirectory(  # pylint: disable=consider-using-with
             prefix="algobotdash-series-"
         )
@@ -246,6 +247,7 @@ class SeriesTests(unittest.TestCase):  # pylint: disable=too-many-public-methods
         open_projection = storage._open_projection  # pylint: disable=protected-access
 
         def limited_connection(*args, **kwargs):
+            """Open the projection with a runtime limit of 999 SQLite bind variables."""
             connection = open_projection(*args, **kwargs)
             connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
             return connection
@@ -312,12 +314,14 @@ class SeriesTests(unittest.TestCase):  # pylint: disable=too-many-public-methods
         original_read = storage.read_metric_sample
 
         def blocked_read(*args, **kwargs):
+            """Hold admitted workers until the test releases their database reads."""
             entered.wait(timeout=3)
             if not release.wait(timeout=3):
                 raise AssertionError("series worker was not released")
             return original_read(*args, **kwargs)
 
         async def requests():
+            """Check responsiveness and admission while two series workers remain active."""
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 first = asyncio.create_task(client.get("/api/series"))
